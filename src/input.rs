@@ -4,14 +4,24 @@ use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
+use crate::layout::Dir;
+
 pub enum Action {
     NewTab,
-    CloseTab,
+    ClosePane,
     NextTab,
     PrevTab,
     SelectTab(usize),
+    Split(Dir),
+    NextPane,
+    PrevPane,
     OpenSettings,
+    Copy,
     Paste,
+    Find,
+    FindNext,
+    FindPrev,
+    ClearScrollback,
     FontBigger,
     FontSmaller,
     FontReset,
@@ -20,7 +30,7 @@ pub enum Action {
 
 /// App shortcuts use Cmd on macOS and Ctrl+Shift elsewhere, so plain Ctrl+letter
 /// always reaches the shell.
-fn is_app_modifier(m: ModifiersState) -> bool {
+pub fn is_app_modifier(m: ModifiersState) -> bool {
     if cfg!(target_os = "macos") {
         m.super_key()
     } else {
@@ -29,22 +39,37 @@ fn is_app_modifier(m: ModifiersState) -> bool {
 }
 
 fn shortcut(event: &KeyEvent, m: ModifiersState) -> Option<Action> {
-    if let Key::Named(NamedKey::Tab) = event.logical_key {
-        if m.control_key() {
-            return Some(if m.shift_key() { Action::PrevTab } else { Action::NextTab });
-        }
+    match event.logical_key {
+        Key::Named(NamedKey::Tab) if m.control_key() => return Some(if m.shift_key() { Action::PrevTab } else { Action::NextTab }),
+        Key::Named(NamedKey::PageDown) if m.control_key() && !m.shift_key() => return Some(Action::NextTab),
+        Key::Named(NamedKey::PageUp) if m.control_key() && !m.shift_key() => return Some(Action::PrevTab),
+        _ => {}
     }
     if !is_app_modifier(m) {
         return None;
     }
     let Key::Character(c) = event.key_without_modifiers() else { return None };
+    let mac = cfg!(target_os = "macos");
+    // On macOS Shift is a free extra modifier; elsewhere it is part of Ctrl+Shift already.
+    let shift = mac && m.shift_key();
     Some(match c.as_str() {
         "t" => Action::NewTab,
-        "w" => Action::CloseTab,
+        "w" => Action::ClosePane,
+        "d" if shift => Action::Split(Dir::Vertical),
+        "d" => Action::Split(Dir::Horizontal),
+        "e" if !mac => Action::Split(Dir::Vertical),
         "," => Action::OpenSettings,
+        "c" => Action::Copy,
         "v" => Action::Paste,
-        "]" => Action::NextTab,
-        "[" => Action::PrevTab,
+        "f" => Action::Find,
+        "g" if shift => Action::FindPrev,
+        "g" => Action::FindNext,
+        "k" => Action::ClearScrollback,
+        // iTerm2 conventions: Cmd+Shift+]/[ = tabs, Cmd+]/[ = panes.
+        "]" | "}" if shift => Action::NextTab,
+        "[" | "{" if shift => Action::PrevTab,
+        "]" => Action::NextPane,
+        "[" => Action::PrevPane,
         "=" | "+" => Action::FontBigger,
         "-" => Action::FontSmaller,
         "0" => Action::FontReset,
