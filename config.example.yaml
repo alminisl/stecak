@@ -24,11 +24,20 @@ shell:
 tabs:
   always_show: true
 
+background_image:
+  path: ""             # e.g. ~/Pictures/wall.jpg (png/jpg/webp)
+  opacity: 1.0         # < 1 lets the desktop show through the image
+  tint: 0.6            # theme background laid over the image
+  fit: cover           # cover | contain | stretch | center
+
 colors:
   foreground: "#cdd6f4"
   background: "#1e1e2e"
   cursor: "#f5e0dc"
   tab_bar: "#181825"
   tab_active: "#313244"
+  selection: "#585b70"
+  search_match: "#f9e2af"
+  search_current: "#fab387"
   palette: ["#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
             "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8"]
