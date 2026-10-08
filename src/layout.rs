@@ -30,20 +30,47 @@ pub enum Node {
     Split { dir: Dir, ratio: f32, a: Box<Node>, b: Box<Node> },
 }
 
+/// A draggable divider: its rect, the rect of the split it divides, and the path
+/// (false = first child, true = second child) from the root to that split node.
+#[derive(Clone, Debug)]
+pub struct Divider {
+    pub rect: Rect,
+    pub split: Rect,
+    pub dir: Dir,
+    pub path: Vec<bool>,
+}
+
 /// Width of the gap between split panes, in physical pixels per unit of scale.
 pub const DIVIDER: f32 = 1.0;
 
 impl Node {
-    /// Pane rectangles plus divider rectangles for this subtree within `r`.
-    pub fn layout(&self, r: Rect, gap: f32, panes: &mut Vec<(PaneId, Rect)>, dividers: &mut Vec<Rect>) {
+    /// Pane rectangles plus dividers for this subtree within `r`.
+    pub fn layout(&self, r: Rect, gap: f32, panes: &mut Vec<(PaneId, Rect)>, dividers: &mut Vec<Divider>) {
+        self.layout_at(r, gap, panes, dividers, &mut Vec::new());
+    }
+
+    fn layout_at(&self, r: Rect, gap: f32, panes: &mut Vec<(PaneId, Rect)>, dividers: &mut Vec<Divider>, path: &mut Vec<bool>) {
         match self {
             Node::Leaf(id) => panes.push((*id, r)),
             Node::Split { dir, ratio, a, b } => {
                 let (ra, rb, div) = split_rect(r, *dir, *ratio, gap);
-                dividers.push(div);
-                a.layout(ra, gap, panes, dividers);
-                b.layout(rb, gap, panes, dividers);
+                dividers.push(Divider { rect: div, split: r, dir: *dir, path: path.clone() });
+                path.push(false);
+                a.layout_at(ra, gap, panes, dividers, path);
+                path.pop();
+                path.push(true);
+                b.layout_at(rb, gap, panes, dividers, path);
+                path.pop();
             }
+        }
+    }
+
+    /// Set the ratio of the split node at `path` (clamped so no pane collapses).
+    pub fn set_ratio(&mut self, path: &[bool], value: f32) {
+        match (self, path.split_first()) {
+            (Node::Split { ratio, .. }, None) => *ratio = value.clamp(0.1, 0.9),
+            (Node::Split { a, b, .. }, Some((&second, rest))) => (if second { b } else { a }).set_ratio(rest, value),
+            (Node::Leaf(_), _) => {}
         }
     }
 
@@ -133,6 +160,13 @@ mod tests {
         assert_eq!(panes.len(), 3);
         assert_eq!(divs.len(), 2);
         assert_eq!(panes[0].1.w, 100.0);
+        assert_eq!(divs[1].path, vec![true]);
+
+        // Dragging the root divider to 25% shrinks the left pane.
+        root.set_ratio(&[], 0.25);
+        let (mut panes, mut divs) = (vec![], vec![]);
+        root.layout(Rect { x: 0.0, y: 0.0, w: 201.0, h: 101.0 }, 1.0, &mut panes, &mut divs);
+        assert_eq!(panes[0].1.w, 50.0);
 
         assert!(root.remove(2));
         ids.clear();
