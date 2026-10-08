@@ -1,7 +1,7 @@
 # Lumen — GPU terminal emulator (proof of concept)
 
 A small, fast, cross-platform terminal: GPU rendering, tabs, ligatures, transparency,
-and a hot-reloaded YAML/JSON config. ~2,100 lines of Rust.
+and a hot-reloaded YAML/JSON config. ~4,100 lines of Rust.
 
 ```sh
 cargo run --release                 # login shell
@@ -44,21 +44,29 @@ clear pick. C++ only wins if you want Qt widgets or must embed into an existing 
 - **Fonts**: memory-mapped, not copied. Fallback fonts (icons, CJK, symbols) are opened only
   the first time a character needs them, and the system font database is dropped after startup.
 
-## Measurements (Apple M5, macOS, 100×30 window, release build)
+## Measurements (Apple M5, macOS 27, release build, 100×30 window)
 
 | | Lumen | iTerm2 |
 |---|---|---|
-| `cat` 34 MB of colored, ligature-heavy text | **0.46 s** (avg of 3) | 4.96 s (avg of 3) |
-| Memory, idle, 1 tab | **31–36 MB** | ~40 MB per window over its base (727 MB total with your existing sessions) |
-| Memory after 1.2 M lines output | 36 MB (2k-line scrollback) / 55 MB (5k) / 65 MB (10k) | +41 MB for one extra window |
-| Binary size | 6.0 MB | ~100 MB app bundle |
+| `cat` 34 MB of colored, ligature-heavy text (avg of 3) | **0.38 s**, screen updating live | 4.70 s |
+| Memory, idle, 1 pane | **33 MB** | ~730 MB total with your existing sessions; about 40 MB per extra window |
+| 4 splits / 4 tabs, idle | 34 MB / 35 MB, so extra panes cost about 1 MB until they fill with scrollback | |
+| With a 6016×6016 JPEG background | 32 MB steady (texture sized to the window) | |
+| After 1.2 M lines of output | 47 MB (2,000-line scrollback) | |
+| Idle CPU | 0.0% | |
+| CPU to build a frame while typing (3 splits) | ~32 µs, with 94% of rows replayed from cache | |
+| Output in a background tab | 0 frames rendered (all skipped) | |
+| Binary | 7.1 MB | ~100 MB app bundle |
 
-Where Lumen's memory goes:
-- 19 MB is the two Retina-size swapchain buffers, which scale with window size.
-- About 5 MB per 1,000 scrollback lines at 100 columns.
-- A few MB of heap.
+Where the 33 MB goes:
+- ~20 MB is macOS framework overhead that any AppKit + Metal app pays (window, menus, CoreAnimation, Metal driver).
+- ~5 MB is swapchain buffers, which scale with window size.
+- ~2 MB is the first block of terminal grid.
+- Lumen's own data (atlases, caches) is under 1 MB.
 
-macOS's Metal driver briefly uses about 70 MB more in the first second after launch, then releases it.
+The Metal driver also uses about 70 MB more for roughly a second after launch, then releases it.
+
+Set `LUMEN_STATS=1` to log frame statistics.
 
 ## Configuration
 
@@ -70,13 +78,33 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 
 | Key | Action |
 |---|---|
-| T / W | new / close tab |
-| 1–9, [ / ], Ctrl+Tab | switch tab |
-| V | paste (bracketed-paste aware) |
+| T / W | new tab / close pane (closes the tab with its last pane) |
+| D / Shift+D (Ctrl+Shift+E off macOS) | split right / split down |
+| ] / [ | next / previous pane |
+| Shift+] / Shift+[, Ctrl+Tab, 1–9 | switch tab |
+| C / V | copy selection / paste (bracketed-paste aware) |
+| F, G / Shift+G | find in scrollback, next / previous match |
+| K | clear scrollback |
 | = / - / 0 | font size bigger / smaller / reset |
-| , | open settings |
+| , | settings page |
 
-Click a tab to switch, Alt+click to close, `+` for a new tab.
+Mouse:
+- Drag to select; double-click selects a word, triple-click a line, Shift+click extends.
+- Cmd+click (Ctrl+click off macOS) opens a URL.
+- In apps that capture the mouse (vim, tmux, htop), hold Shift to select text instead.
+- Dropping a file types its path. Dropping an image while settings are open sets the background.
+
+## Background image
+
+```yaml
+background_image:
+  path: ~/Pictures/wall.jpg
+  opacity: 0.55   # below 1, the (blurred) desktop shows through the image
+  tint: 0.35      # theme background color laid over the image
+  fit: cover      # cover | contain | stretch | center
+```
+
+The image is decoded on a worker thread and resized to the window, so a 4K wallpaper costs only window-size GPU memory. JPEGs are decoded directly at 1/2, 1/4 or 1/8 scale.
 
 ## Transparency per OS
 
@@ -89,13 +117,20 @@ Click a tab to switch, Alt+click to close, `+` for a new tab.
 
 **Only macOS has been run so far.** Windows and Linux compile paths exist but are untested.
 
-## Not done yet (next steps)
+## What Lumen builds itself vs. what it reuses
 
-- Mouse selection + copy, URL clicking, search
-- Mouse reporting to apps (vim/tmux mouse mode)
-- Color emoji (needs an RGBA atlas next to the R8 one)
-- A GUI settings page. A config file plus hot reload is how Ghostty and Alacritty do it. A GUI
-  could be a small `egui` panel drawn with the same `wgpu` device.
-- Splits, and per-tab current working directory for new tabs
-- Damage tracking (redraw only changed rows) and a more compact scrollback format
-  (Ghostty-style pages) to push memory lower
+Lumen uses the **`alacritty_terminal` library crate**: the VT/ANSI parser, the grid/scrollback storage, and the selection, regex-search and damage-tracking primitives. That's the same core Zed's built-in terminal uses. It does **not** use or wrap the Alacritty *app*. The following are all Lumen's own code:
+- window and renderer (wgpu; Alacritty uses OpenGL)
+- font loading and fallback
+- shaping and ligatures (Alacritty has no ligatures)
+- color emoji
+- tabs and splits (Alacritty has neither)
+- background image, settings page, search UI, mouse/URL handling
+- damage cache, frame skipping and config
+
+## Not done yet
+
+- Windows and Linux builds are written but not yet run.
+- Resizing splits with the mouse (splits are currently equal halves)
+- Compressed scrollback. Would need its own grid instead of `alacritty_terminal`'s, which is the main remaining memory lever.
+- Kitty keyboard protocol, inline images (sixel/kitty graphics), IME composition
