@@ -31,7 +31,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -39,7 +39,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use config::{Config, ShellConfig};
 use draw::{DrawStats, Highlights, PaneCache};
 use input::Action;
-use layout::{Dir, Node, Rect};
+use layout::{Dir, Divider, Node, Rect};
 use pane::{GridSize, Pane, PaneId, UserEvent};
 use renderer::Renderer;
 use search::Search;
@@ -51,11 +51,12 @@ struct Tab {
     focus: PaneId,
 }
 
-/// Mouse button state while dragging a selection or reporting to an app.
-#[derive(Clone, Copy)]
+/// Mouse button state while dragging a selection, reporting to an app, or resizing a split.
+#[derive(Clone)]
 enum Drag {
     Select(PaneId),
     Report(PaneId),
+    Divider(Divider),
 }
 
 /// Frame-time statistics, logged every few seconds with LUMEN_STATS=1.
@@ -92,6 +93,9 @@ struct App {
     last_click: Option<(Instant, PaneId, Point, u8)>,
     hover_url: Option<(PaneId, i32, usize, usize, String)>,
     scroll_accum: f64,
+    cursor_icon: CursorIcon,
+    /// IME composition in progress (e.g. pinyin, or a dead key like ´ before e).
+    preedit: String,
     focused: bool,
     occluded: bool,
 
@@ -139,6 +143,8 @@ impl App {
             last_click: None,
             hover_url: None,
             scroll_accum: 0.0,
+            cursor_icon: CursorIcon::Text,
+            preedit: String::new(),
             focused: true,
             occluded: false,
             search: Search::default(),
@@ -161,7 +167,7 @@ impl App {
     }
 
     /// Geometry of every pane in tab `tab`.
-    fn geometry(&self, tab: usize) -> (Vec<PaneGeom>, Vec<Rect>) {
+    fn geometry(&self, tab: usize) -> (Vec<PaneGeom>, Vec<Divider>) {
         let Some(t) = self.tabs.get(tab) else { return (vec![], vec![]) };
         let r = self.r();
         let (w, h) = r.size();
@@ -595,10 +601,20 @@ impl App {
         let changed = hover.as_ref().map(|h| (h.0, h.1, h.2)) != self.hover_url.as_ref().map(|h| (h.0, h.1, h.2));
         self.hover_url = hover;
         if changed {
-            if let Some(w) = &self.window {
-                w.set_cursor(if self.hover_url.is_some() { CursorIcon::Pointer } else { CursorIcon::Text });
-            }
             self.mark_dirty();
+        }
+        let icon = match (&self.hover_url, self.divider_under_mouse()) {
+            (Some(_), _) => CursorIcon::Pointer,
+            (None, Some(d)) if d.dir == Dir::Horizontal => CursorIcon::ColResize,
+            (None, Some(_)) => CursorIcon::RowResize,
+            (None, None) if self.mouse.1 < self.tab_bar_h() => CursorIcon::Default,
+            (None, None) => CursorIcon::Text,
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(w) = &self.window {
+                w.set_cursor(icon);
+            }
         }
     }
 
@@ -631,6 +647,12 @@ impl App {
                 self.on_tab_bar_click(x, event_loop);
             }
             return;
+        }
+        if button == MouseButton::Left {
+            if let Some(d) = self.divider_under_mouse() {
+                self.drag = Some(Drag::Divider(d));
+                return;
+            }
         }
         let Some((g, col, row, side)) = self.hit() else { return };
         if self.tabs[self.active].focus != g.id {
@@ -707,13 +729,33 @@ impl App {
                 }
                 self.mark_dirty();
             }
-            None => {}
+            Some(Drag::Divider(_)) | None => {}
         }
+    }
+
+    /// Divider within a few pixels of the mouse (dividers are 1px; give them a usable grab area).
+    fn divider_under_mouse(&self) -> Option<Divider> {
+        let (x, y) = self.mouse;
+        let slop = 4.0 * self.r().scale;
+        let (_, dividers) = self.geometry(self.active);
+        dividers.into_iter().find(|d| {
+            let r = d.rect;
+            Rect { x: r.x - slop, y: r.y - slop, w: r.w + 2.0 * slop, h: r.h + 2.0 * slop }.contains(x, y)
+        })
     }
 
     fn on_motion(&mut self) {
         self.update_hover();
-        match self.drag {
+        match self.drag.clone() {
+            Some(Drag::Divider(d)) => {
+                let (x, y) = self.mouse;
+                let ratio = match d.dir {
+                    Dir::Horizontal => (x - d.split.x) / d.split.w,
+                    Dir::Vertical => (y - d.split.y) / d.split.h,
+                };
+                self.tabs[self.active].root.set_ratio(&d.path, ratio);
+                self.resize_all();
+            }
             Some(Drag::Select(id)) => {
                 let (cw, ch) = self.r().cell();
                 let (geoms, _) = self.geometry(self.active);
@@ -732,8 +774,7 @@ impl App {
                 self.mark_dirty();
             }
             Some(Drag::Report(id)) => {
-                if let Some((g, col, row, _)) = self.hit().filter(|h| h.0.id == id) {
-                    let _ = g;
+                if let Some((_, col, row, _)) = self.hit().filter(|h| h.0.id == id) {
                     self.mouse_report(id, mouse::Button::Left, true, true, col, row);
                 }
             }
@@ -875,7 +916,27 @@ impl App {
                 draw_search_bar(r, theme, search, g);
             }
         }
+        // IME: show the text being composed at the cursor, and tell the OS where the cursor is
+        // so the candidate window appears next to it.
+        if let Some(g) = geoms.iter().find(|g| Some(g.id) == focus) {
+            if let Some(p) = panes.get(&g.id) {
+                let term = p.term.lock();
+                let c = term.grid().cursor.point;
+                let (x, y) = (g.gx + c.column.0 as f32 * cw, g.gy + c.line.0 as f32 * ch);
+                drop(term);
+                if !self.preedit.is_empty() {
+                    let w = self.preedit.chars().count() as f32 * cw;
+                    r.rect(x, y, w, ch, rgba(theme.bg, 1.0));
+                    r.text(&self.preedit, x, y, x + w + cw, rgba(theme.fg, 1.0));
+                    r.rect(x, y + ch - 2.0 * r.scale, w, r.scale.max(1.0), rgba(theme.fg, 1.0));
+                }
+                if let Some(w) = &self.window {
+                    w.set_ime_cursor_area(winit::dpi::PhysicalPosition::new(x, y), PhysicalSize::new(cw, ch));
+                }
+            }
+        }
         for d in &dividers {
+            let d = d.rect;
             r.rect(d.x, d.y, d.w, d.h, rgba(theme.tab_active, 1.0));
         }
 
@@ -1020,6 +1081,7 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(winit::dpi::LogicalSize::new(900.0, 560.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         window.set_cursor(CursorIcon::Text);
+        window.set_ime_allowed(true);
 
         if self.config.window.blur {
             apply_blur(&window, 20);
@@ -1115,6 +1177,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.modifiers = m.state();
                 self.update_hover();
             }
+            // While an IME is composing, keys belong to it; the result arrives as Ime::Commit.
+            WindowEvent::KeyboardInput { .. } if !self.preedit.is_empty() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let app_mod = input::is_app_modifier(self.modifiers);
                 if self.settings.open && !app_mod && self.settings_key(&event) {
@@ -1128,6 +1192,24 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handle_action(action, event_loop);
                 }
             }
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                self.preedit = text;
+                self.mark_dirty();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.preedit.clear();
+                if self.search.open {
+                    let q = format!("{}{text}", self.search.query);
+                    if let Some(p) = self.panes.get(&self.search.pane) {
+                        self.search.set_query(q, &mut p.term.lock());
+                    }
+                    self.search_gen += 1;
+                    self.mark_dirty();
+                } else {
+                    self.handle_action(Action::Write(text.into_bytes()), event_loop);
+                }
+            }
+            WindowEvent::Ime(_) => {}
             WindowEvent::DroppedFile(path) => {
                 let is_image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg", "webp"].contains(&e.to_ascii_lowercase().as_str()));
                 if self.settings.open && is_image {
