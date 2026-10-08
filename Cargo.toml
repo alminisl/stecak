@@ -11,6 +11,10 @@ alacritty_terminal = "0.26"
 portable-pty = "0.9"
 swash = "0.2"
 memmap2 = "0.9"
+# Background images: decoders only for common formats, to keep the binary small.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# JPEG DCT-domain downscaling: decode a 6000px wallpaper at 1/4 size instead of full size.
+jpeg-decoder = { version = "0.3", default-features = false }
 fontdb = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,6 +26,9 @@ arboard = "3"
 dirs = "6"
 log = "0.4"
 env_logger = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

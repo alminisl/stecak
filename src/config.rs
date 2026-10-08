@@ -16,6 +16,7 @@ pub struct Config {
     pub colors: ColorConfig,
     pub shell: ShellConfig,
     pub tabs: TabsConfig,
+    pub background_image: BackgroundImageConfig,
     pub scrollback: usize,
     /// Treat macOS Option key as Alt (sends ESC-prefixed sequences).
     pub option_as_alt: bool,
@@ -57,8 +58,45 @@ pub struct ColorConfig {
     pub cursor: String,
     pub tab_bar: String,
     pub tab_active: String,
+    pub selection: String,
+    pub search_match: String,
+    pub search_current: String,
     /// 16 ANSI colors: black, red, green, yellow, blue, magenta, cyan, white, then the bright variants.
     pub palette: Vec<String>,
+}
+
+/// iTerm2-style background image. Layers, bottom to top: desktop → image (`opacity`)
+/// → theme background (`tint`) → text. Lower both for a see-through window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackgroundImageConfig {
+    /// PNG/JPEG/WebP path; `~` is expanded. Empty = no image.
+    pub path: String,
+    /// How opaque the image is (0..1). Below 1 the desktop shows through it.
+    pub opacity: f32,
+    /// How strongly the theme background color is laid over the image (0..1).
+    pub tint: f32,
+    /// "cover" (fill, crop), "contain" (fit, letterbox), "stretch", or "center".
+    pub fit: String,
+}
+
+impl Default for BackgroundImageConfig {
+    fn default() -> Self {
+        Self { path: String::new(), opacity: 1.0, tint: 0.6, fit: "cover".into() }
+    }
+}
+
+impl BackgroundImageConfig {
+    pub fn resolved_path(&self) -> Option<PathBuf> {
+        let p = self.path.trim();
+        if p.is_empty() {
+            return None;
+        }
+        Some(match p.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir()?.join(rest),
+            None => PathBuf::from(p),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -84,6 +122,7 @@ impl Default for Config {
             colors: ColorConfig::default(),
             shell: ShellConfig::default(),
             tabs: TabsConfig::default(),
+            background_image: BackgroundImageConfig::default(),
             scrollback: 2_000,
             option_as_alt: true,
         }
@@ -119,6 +158,10 @@ impl Default for FontConfig {
                 "Hiragino Sans",
                 "Microsoft YaHei",
                 "Noto Sans CJK SC",
+                // Color emoji last so text-presentation symbols prefer the fonts above.
+                "Apple Color Emoji",
+                "Segoe UI Emoji",
+                "Noto Color Emoji",
             ]
                 .iter()
                 .map(|s| s.to_string())
@@ -158,6 +201,9 @@ impl Default for ColorConfig {
             cursor: "#f5e0dc".into(),
             tab_bar: "#181825".into(),
             tab_active: "#313244".into(),
+            selection: "#585b70".into(),
+            search_match: "#f9e2af".into(),
+            search_current: "#fab387".into(),
             palette: [
                 "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5",
                 "#bac2de", "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7",
@@ -247,11 +293,16 @@ pub fn load() -> Config {
     }
 }
 
-/// Write the default config to disk (used by "open settings" when no file exists yet).
-pub fn write_default(path: &Path) -> std::io::Result<()> {
+/// Persist the config (used by the settings page). JSON files stay JSON.
+pub fn save(cfg: &Config, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let yaml = serde_yaml::to_string(&Config::default()).unwrap_or_default();
-    std::fs::write(path, format!("# Lumen configuration (hot-reloaded on save)\n{yaml}"))
+    let is_json = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    let text = if is_json {
+        serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?
+    } else {
+        format!("# Lumen configuration (hot-reloaded on save; also editable from the settings page, Cmd+,)\n{}", serde_yaml::to_string(cfg).map_err(std::io::Error::other)?)
+    };
+    std::fs::write(path, text)
 }

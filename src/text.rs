@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use swash::scale::{Render, ScaleContext, Source};
+use swash::scale::image::Content;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::shape::ShapeContext;
 use swash::zeno::Format;
 use swash::{CacheKey, FontRef};
@@ -71,6 +72,8 @@ pub struct RasterGlyph {
     pub top: i32,
     pub width: u32,
     pub height: u32,
+    /// RGBA (emoji) when true, otherwise 8-bit coverage.
+    pub color: bool,
     pub data: Vec<u8>,
 }
 
@@ -266,12 +269,17 @@ impl Text {
     pub fn rasterize(&mut self, face: u16, glyph: u16) -> Option<RasterGlyph> {
         let font = face_in(&self.faces, face).font();
         let mut scaler = self.scale_ctx.builder(font).size(self.px).hint(true).build();
-        let img = Render::new(&[Source::Outline]).format(Format::Alpha).render(&mut scaler, glyph)?;
+        // Color sources first so emoji fonts (sbix/COLR) render in color; plain fonts fall
+        // through to the outline and produce an alpha mask.
+        let img = Render::new(&[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline])
+            .format(Format::Alpha)
+            .render(&mut scaler, glyph)?;
         Some(RasterGlyph {
             left: img.placement.left,
             top: img.placement.top,
             width: img.placement.width,
             height: img.placement.height,
+            color: img.content == Content::Color,
             data: img.data,
         })
     }

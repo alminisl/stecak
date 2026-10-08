@@ -1,6 +1,6 @@
-//! GPU renderer: a glyph atlas plus instanced quads, the same basic design as
+//! GPU renderer: glyph atlases plus instanced quads, the same basic design as
 //! Alacritty/Ghostty/Kitty. Each frame is a single draw call: one instance per
-//! background rect, glyph, or cursor.
+//! background rect, glyph, emoji, or the background image.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,8 +11,15 @@ use winit::window::Window;
 use crate::config::Config;
 use crate::text::{self, Shaped, Text};
 
-// 1024² R8 = 1 MB of GPU memory, ~1500 glyphs at Retina sizes; it is reset if it fills up.
-const ATLAS_SIZE: u32 = 1024;
+// 1024² R8 = 1 MB of GPU memory, ~1500 glyphs at Retina sizes; reset if it fills up.
+const MASK_ATLAS: u32 = 1024;
+// 512² RGBA = 1 MB, for color emoji only.
+const COLOR_ATLAS: u32 = 512;
+
+const KIND_RECT: u32 = 0;
+const KIND_MASK: u32 = 1;
+const KIND_COLOR: u32 = 2;
+const KIND_IMAGE: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -30,7 +37,7 @@ pub struct Instance {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     screen: [f32; 2],
-    atlas: [f32; 2],
+    _pad: [f32; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -41,6 +48,53 @@ struct GlyphEntry {
     h: u32,
     left: f32,
     top: f32,
+    color: bool,
+}
+
+/// Simple shelf packer for a square atlas.
+struct Packer {
+    size: u32,
+    x: u32,
+    y: u32,
+    row_h: u32,
+}
+
+impl Packer {
+    fn new(size: u32) -> Self {
+        Self { size, x: 0, y: 0, row_h: 0 }
+    }
+
+    /// Returns a slot, or None when the atlas is full.
+    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if w + 1 > self.size || h + 1 > self.size {
+            return None;
+        }
+        if self.x + w + 1 > self.size {
+            self.x = 0;
+            self.y += self.row_h + 1;
+            self.row_h = 0;
+        }
+        if self.y + h + 1 > self.size {
+            return None;
+        }
+        let slot = (self.x, self.y);
+        self.x += w + 1;
+        self.row_h = self.row_h.max(h);
+        Some(slot)
+    }
+}
+
+fn texture(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 pub struct Renderer {
@@ -49,19 +103,25 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface_cfg: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    bind_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
-    atlas_tex: wgpu::Texture,
+    mask_tex: wgpu::Texture,
+    color_tex: wgpu::Texture,
+    image_tex: wgpu::Texture,
+    nearest: wgpu::Sampler,
+    linear: wgpu::Sampler,
     instance_buf: wgpu::Buffer,
     instance_cap: usize,
     instances: Vec<Instance>,
 
     text: Text,
     glyphs: HashMap<(u16, u16), GlyphEntry>,
-    // Shelf packer state for the atlas.
-    shelf_x: u32,
-    shelf_y: u32,
-    shelf_h: u32,
+    mask_packer: Packer,
+    color_packer: Packer,
+    /// Bumped whenever an atlas is reset, invalidating cached instances.
+    atlas_gen: u64,
+    pub image_size: Option<(u32, u32)>,
     pub scale: f32,
     pub transparent: bool,
     premultiplied: bool,
@@ -88,7 +148,8 @@ impl Renderer {
             required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
-        })).expect("request device");
+        }))
+        .expect("request device");
 
         let caps = surface.get_capabilities(&adapter);
         // Non-sRGB format: terminal colors are specified in sRGB and blended as-is, like other terminals.
@@ -122,31 +183,44 @@ impl Renderer {
         surface.configure(&device, &surface_cfg);
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
             size: std::mem::size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph atlas"),
-            size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let atlas_view = atlas_tex.create_view(&Default::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let mask_tex = texture(&device, "mask atlas", MASK_ATLAS, MASK_ATLAS, wgpu::TextureFormat::R8Unorm);
+        let color_tex = texture(&device, "color atlas", COLOR_ATLAS, COLOR_ATLAS, wgpu::TextureFormat::Rgba8Unorm);
+        // 1×1 transparent placeholder until a background image is configured.
+        let image_tex = texture(&device, "background image", 1, 1, wgpu::TextureFormat::Rgba8Unorm);
+        let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -155,40 +229,20 @@ impl Renderer {
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                tex_entry(1),
+                sampler_entry(2),
+                tex_entry(3),
+                tex_entry(4),
+                sampler_entry(5),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: &[Some(&bind_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cells"),
+            label: Some("quads"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -228,6 +282,7 @@ impl Renderer {
 
         let instance_cap = 4096;
         let instance_buf = Self::make_instance_buf(&device, instance_cap);
+        let bind_group = Self::make_bind_group(&device, &bind_layout, &globals_buf, &mask_tex, &color_tex, &image_tex, &nearest, &linear);
 
         let scale = window.scale_factor() as f32;
         let text = Text::load(cfg, scale);
@@ -238,21 +293,53 @@ impl Renderer {
             queue,
             surface_cfg,
             pipeline,
+            bind_layout,
             bind_group,
             globals_buf,
-            atlas_tex,
+            mask_tex,
+            color_tex,
+            image_tex,
+            nearest,
+            linear,
             instance_buf,
             instance_cap,
             instances: Vec::with_capacity(instance_cap),
             text,
             glyphs: HashMap::new(),
-            shelf_x: 0,
-            shelf_y: 0,
-            shelf_h: 0,
+            mask_packer: Packer::new(MASK_ATLAS),
+            color_packer: Packer::new(COLOR_ATLAS),
+            atlas_gen: 0,
+            image_size: None,
             scale,
             transparent,
             premultiplied: alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        globals: &wgpu::Buffer,
+        mask: &wgpu::Texture,
+        color: &wgpu::Texture,
+        image: &wgpu::Texture,
+        nearest: &wgpu::Sampler,
+        linear: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        let (mask_v, color_v, image_v) = (mask.create_view(&Default::default()), color.create_view(&Default::default()), image.create_view(&Default::default()));
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&mask_v) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(nearest) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&color_v) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&image_v) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(linear) },
+            ],
+        })
     }
 
     fn make_instance_buf(device: &wgpu::Device, cap: usize) -> wgpu::Buffer {
@@ -274,14 +361,52 @@ impl Renderer {
         (self.surface_cfg.width as f32, self.surface_cfg.height as f32)
     }
 
-    /// Reload fonts (config change or DPI change). Clears the glyph cache.
+    /// Reload fonts (config change or DPI change). Clears the glyph caches.
     pub fn reload_fonts(&mut self, cfg: &Config, scale: f32) {
         self.scale = scale;
         self.text = Text::load(cfg, scale);
+        self.reset_atlases();
+    }
+
+    fn reset_atlases(&mut self) {
         self.glyphs.clear();
-        self.shelf_x = 0;
-        self.shelf_y = 0;
-        self.shelf_h = 0;
+        self.mask_packer = Packer::new(MASK_ATLAS);
+        self.color_packer = Packer::new(COLOR_ATLAS);
+        self.atlas_gen += 1;
+    }
+
+    pub fn atlas_gen(&self) -> u64 {
+        self.atlas_gen
+    }
+
+    /// Replace the background image (already decoded and sized for the window), or remove it.
+    /// The CPU copy is dropped right after upload; only the GPU texture remains.
+    pub fn set_background_image(&mut self, image: Option<(Vec<u8>, u32, u32)>) {
+        let (tex, size) = match image {
+            Some((rgba, w, h)) => {
+                let tex = texture(&self.device, "background image", w, h, wgpu::TextureFormat::Rgba8Unorm);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    &rgba,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+                (tex, Some((w, h)))
+            }
+            None => (texture(&self.device, "background image", 1, 1, wgpu::TextureFormat::Rgba8Unorm), None),
+        };
+        self.image_tex = tex;
+        self.image_size = size;
+        self.bind_group = Self::make_bind_group(
+            &self.device,
+            &self.bind_layout,
+            &self.globals_buf,
+            &self.mask_tex,
+            &self.color_tex,
+            &self.image_tex,
+            &self.nearest,
+            &self.linear,
+        );
     }
 
     /// Cell size in physical pixels.
@@ -293,8 +418,35 @@ impl Renderer {
         self.instances.clear();
     }
 
+    /// Current position in the instance list (for capturing a row into a cache).
+    pub fn mark(&self) -> usize {
+        self.instances.len()
+    }
+
+    pub fn since(&self, mark: usize) -> &[Instance] {
+        &self.instances[mark..]
+    }
+
+    /// Replay previously captured instances.
+    pub fn extend(&mut self, cached: &[Instance]) {
+        self.instances.extend_from_slice(cached);
+    }
+
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        self.instances.push(Instance { pos: [x, y], size: [w, h], uv_pos: [0.0; 2], uv_size: [0.0; 2], color, kind: 0, _pad: [0; 3] });
+        self.instances.push(Instance { pos: [x, y], size: [w, h], uv_pos: [0.0; 2], uv_size: [0.0; 2], color, kind: KIND_RECT, _pad: [0; 3] });
+    }
+
+    /// Background image quad; `uv` is the normalized source rect.
+    pub fn image(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], alpha: f32) {
+        self.instances.push(Instance {
+            pos: [x, y],
+            size: [w, h],
+            uv_pos: [uv[0], uv[1]],
+            uv_size: [uv[2], uv[3]],
+            color: [1.0, 1.0, 1.0, alpha],
+            kind: KIND_IMAGE,
+            _pad: [0; 3],
+        });
     }
 
     /// Draw a run of same-styled cells starting at pixel (x0, y). `cells` holds each
@@ -325,17 +477,34 @@ impl Renderer {
             if g.w == 0 {
                 continue;
             }
-            let px = (x0 + col as f32 * cw + x + g.left).round();
-            let py = (y + self.text.baseline - gy - g.top).round();
-            self.instances.push(Instance {
-                pos: [px, py],
-                size: [g.w as f32, g.h as f32],
-                uv_pos: [g.x as f32, g.y as f32],
-                uv_size: [g.w as f32, g.h as f32],
-                color,
-                kind: 1,
-                _pad: [0; 3],
-            });
+            let cell_x = x0 + col as f32 * cw;
+            let instance = if g.color {
+                // Emoji bitmaps come in fixed strike sizes; fit them into two cells × one line.
+                let s = (ch / g.h as f32).min(2.0 * cw / g.w as f32).min(1.0);
+                let (w, h) = (g.w as f32 * s, g.h as f32 * s);
+                let size = COLOR_ATLAS as f32;
+                Instance {
+                    pos: [(cell_x + (2.0 * cw - w) / 2.0).round(), (y + (ch - h) / 2.0).round()],
+                    size: [w, h],
+                    uv_pos: [g.x as f32 / size, g.y as f32 / size],
+                    uv_size: [g.w as f32 / size, g.h as f32 / size],
+                    color: [1.0, 1.0, 1.0, color[3]],
+                    kind: KIND_COLOR,
+                    _pad: [0; 3],
+                }
+            } else {
+                let size = MASK_ATLAS as f32;
+                Instance {
+                    pos: [(cell_x + x + g.left).round(), (y + self.text.baseline - gy - g.top).round()],
+                    size: [g.w as f32, g.h as f32],
+                    uv_pos: [g.x as f32 / size, g.y as f32 / size],
+                    uv_size: [g.w as f32 / size, g.h as f32 / size],
+                    color,
+                    kind: KIND_MASK,
+                    _pad: [0; 3],
+                }
+            };
+            self.instances.push(instance);
         }
     }
 
@@ -352,7 +521,12 @@ impl Renderer {
         if down > 0 { self.rect(cx - (thick(down) / 2.0).floor(), cy - (hw / 2.0).floor(), thick(down), y + ch - cy + (hw / 2.0).floor(), color); }
     }
 
-    /// Draw plain UI text (tab titles) clipped to max_x.
+    /// X position right after `s` drawn at `x` (clipped to max_x).
+    pub fn text_end(&self, s: &str, x: f32, max_x: f32) -> f32 {
+        (x + s.chars().count() as f32 * self.text.cell_w).min(max_x)
+    }
+
+    /// Draw plain UI text (tab titles, overlays) clipped to max_x.
     pub fn text(&mut self, s: &str, x: f32, y: f32, max_x: f32, color: [f32; 4]) {
         let fit = ((max_x - x) / self.text.cell_w).floor().max(0.0) as usize;
         let cells: Vec<(char, u16)> = s.chars().take(fit).enumerate().map(|(i, c)| (c, i as u16)).collect();
@@ -363,33 +537,30 @@ impl Renderer {
         if let Some(e) = self.glyphs.get(&(face, glyph)) {
             return Some(*e);
         }
+        let empty = GlyphEntry { x: 0, y: 0, w: 0, h: 0, left: 0.0, top: 0.0, color: false };
         let entry = match self.text.rasterize(face, glyph) {
             Some(r) if r.width > 0 && r.height > 0 => {
                 let (w, h) = (r.width, r.height);
-                if self.shelf_x + w + 1 > ATLAS_SIZE {
-                    self.shelf_x = 0;
-                    self.shelf_y += self.shelf_h + 1;
-                    self.shelf_h = 0;
-                }
-                if self.shelf_y + h + 1 > ATLAS_SIZE {
-                    // Atlas full: start over. Glyphs get re-rasterized lazily.
-                    self.glyphs.clear();
-                    self.shelf_x = 0;
-                    self.shelf_y = 0;
-                    self.shelf_h = 0;
-                }
-                let (x, y) = (self.shelf_x, self.shelf_y);
+                let packer = if r.color { &mut self.color_packer } else { &mut self.mask_packer };
+                let slot = match packer.alloc(w, h) {
+                    Some(s) => s,
+                    None => {
+                        // Atlas full: start over; glyphs are re-rasterized lazily.
+                        self.reset_atlases();
+                        let packer = if r.color { &mut self.color_packer } else { &mut self.mask_packer };
+                        packer.alloc(w, h)?
+                    }
+                };
+                let (tex, bpp) = if r.color { (&self.color_tex, 4) } else { (&self.mask_tex, 1) };
                 self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo { texture: &self.atlas_tex, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x: slot.0, y: slot.1, z: 0 }, aspect: wgpu::TextureAspect::All },
                     &r.data,
-                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * bpp), rows_per_image: Some(h) },
                     wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 );
-                self.shelf_x += w + 1;
-                self.shelf_h = self.shelf_h.max(h);
-                GlyphEntry { x, y, w, h, left: r.left as f32, top: r.top as f32 }
+                GlyphEntry { x: slot.0, y: slot.1, w, h, left: r.left as f32, top: r.top as f32, color: r.color }
             }
-            _ => GlyphEntry { x: 0, y: 0, w: 0, h: 0, left: 0.0, top: 0.0 },
+            _ => empty,
         };
         self.glyphs.insert((face, glyph), entry);
         Some(entry)
@@ -411,7 +582,7 @@ impl Renderer {
             self.instance_buf = Self::make_instance_buf(&self.device, self.instance_cap);
         }
         self.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&self.instances));
-        let globals = Globals { screen: [self.surface_cfg.width as f32, self.surface_cfg.height as f32], atlas: [ATLAS_SIZE as f32; 2] };
+        let globals = Globals { screen: [self.surface_cfg.width as f32, self.surface_cfg.height as f32], _pad: [0.0; 2] };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         let view = frame.texture.create_view(&Default::default());
