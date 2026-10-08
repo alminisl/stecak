@@ -1,0 +1,446 @@
+//! GPU renderer: a glyph atlas plus instanced quads, the same basic design as
+//! Alacritty/Ghostty/Kitty. Each frame is a single draw call: one instance per
+//! background rect, glyph, or cursor.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytemuck::{Pod, Zeroable};
+use winit::window::Window;
+
+use crate::config::Config;
+use crate::text::{self, Shaped, Text};
+
+// 1024² R8 = 1 MB of GPU memory, ~1500 glyphs at Retina sizes; it is reset if it fills up.
+const ATLAS_SIZE: u32 = 1024;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Instance {
+    pos: [f32; 2],
+    size: [f32; 2],
+    uv_pos: [f32; 2],
+    uv_size: [f32; 2],
+    color: [f32; 4],
+    kind: u32,
+    _pad: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Globals {
+    screen: [f32; 2],
+    atlas: [f32; 2],
+}
+
+#[derive(Clone, Copy)]
+struct GlyphEntry {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    left: f32,
+    top: f32,
+}
+
+pub struct Renderer {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_cfg: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    globals_buf: wgpu::Buffer,
+    atlas_tex: wgpu::Texture,
+    instance_buf: wgpu::Buffer,
+    instance_cap: usize,
+    instances: Vec<Instance>,
+
+    text: Text,
+    glyphs: HashMap<(u16, u16), GlyphEntry>,
+    // Shelf packer state for the atlas.
+    shelf_x: u32,
+    shelf_y: u32,
+    shelf_h: u32,
+    pub scale: f32,
+    pub transparent: bool,
+    premultiplied: bool,
+}
+
+impl Renderer {
+    pub fn new(window: Arc<Window>, display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>, cfg: &Config) -> Renderer {
+        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(display);
+        // On Windows, composition-based swapchains are what make per-pixel alpha possible.
+        desc.backend_options.dx12.presentation_system = wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual;
+        let instance = wgpu::Instance::new(desc);
+        let surface = instance.create_surface(window.clone()).expect("create surface");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("no GPU adapter");
+        log::info!("GPU adapter: {:?}", adapter.get_info());
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            ..Default::default()
+        })).expect("request device");
+
+        let caps = surface.get_capabilities(&adapter);
+        // Non-sRGB format: terminal colors are specified in sRGB and blended as-is, like other terminals.
+        let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+        let alpha_mode = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
+            .into_iter()
+            .find(|m| caps.alpha_modes.contains(m))
+            .unwrap_or(caps.alpha_modes[0]);
+        let transparent = alpha_mode != wgpu::CompositeAlphaMode::Opaque;
+        log::info!("surface format {format:?}, alpha mode {alpha_mode:?} (supported: {:?})", caps.alpha_modes);
+
+        let present_mode = match cfg.window.present_mode.as_str() {
+            "fifo" => wgpu::PresentMode::Fifo,
+            "immediate" if caps.present_modes.contains(&wgpu::PresentMode::Immediate) => wgpu::PresentMode::Immediate,
+            _ if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) => wgpu::PresentMode::Mailbox,
+            _ => wgpu::PresentMode::Fifo,
+        };
+
+        let size = window.inner_size();
+        let surface_cfg = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode,
+            desired_maximum_frame_latency: 1,
+            alpha_mode,
+            view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        surface.configure(&device, &surface_cfg);
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+
+        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph atlas"),
+            size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas_tex.create_view(&Default::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cells"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Instance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Uint32
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let instance_cap = 4096;
+        let instance_buf = Self::make_instance_buf(&device, instance_cap);
+
+        let scale = window.scale_factor() as f32;
+        let text = Text::load(cfg, scale);
+
+        Renderer {
+            surface,
+            device,
+            queue,
+            surface_cfg,
+            pipeline,
+            bind_group,
+            globals_buf,
+            atlas_tex,
+            instance_buf,
+            instance_cap,
+            instances: Vec::with_capacity(instance_cap),
+            text,
+            glyphs: HashMap::new(),
+            shelf_x: 0,
+            shelf_y: 0,
+            shelf_h: 0,
+            scale,
+            transparent,
+            premultiplied: alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+        }
+    }
+
+    fn make_instance_buf(device: &wgpu::Device, cap: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("instances"),
+            size: (cap * std::mem::size_of::<Instance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.surface_cfg.width = width.max(1);
+        self.surface_cfg.height = height.max(1);
+        self.surface.configure(&self.device, &self.surface_cfg);
+    }
+
+    pub fn size(&self) -> (f32, f32) {
+        (self.surface_cfg.width as f32, self.surface_cfg.height as f32)
+    }
+
+    /// Reload fonts (config change or DPI change). Clears the glyph cache.
+    pub fn reload_fonts(&mut self, cfg: &Config, scale: f32) {
+        self.scale = scale;
+        self.text = Text::load(cfg, scale);
+        self.glyphs.clear();
+        self.shelf_x = 0;
+        self.shelf_y = 0;
+        self.shelf_h = 0;
+    }
+
+    /// Cell size in physical pixels.
+    pub fn cell(&self) -> (f32, f32) {
+        (self.text.cell_w, self.text.cell_h)
+    }
+
+    pub fn begin(&mut self) {
+        self.instances.clear();
+    }
+
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        self.instances.push(Instance { pos: [x, y], size: [w, h], uv_pos: [0.0; 2], uv_size: [0.0; 2], color, kind: 0, _pad: [0; 3] });
+    }
+
+    /// Draw a run of same-styled cells starting at pixel (x0, y). `cells` holds each
+    /// character with its column relative to x0. Ligatures are applied within the run.
+    pub fn run(&mut self, cells: &[(char, u16)], style: u8, x0: f32, y: f32, color: [f32; 4]) {
+        let (cw, ch) = (self.text.cell_w, self.text.cell_h);
+        // Box drawing / block elements are drawn as rects so they join seamlessly across cells;
+        // they become spaces for the shaper so the remaining columns stay aligned.
+        let mut shaped_cells: Vec<(char, u16)> = Vec::with_capacity(cells.len());
+        for &(c, col) in cells {
+            let x = x0 + col as f32 * cw;
+            if let Some(lines) = text::box_lines(c) {
+                self.box_drawing(lines, x, y, color);
+                shaped_cells.push((' ', col));
+            } else if let Some((r, a)) = text::block(c) {
+                self.rect(x + r[0] * cw, y + r[1] * ch, (r[2] - r[0]) * cw, (r[3] - r[1]) * ch, [color[0], color[1], color[2], color[3] * a]);
+                shaped_cells.push((' ', col));
+            } else {
+                shaped_cells.push((c, col));
+            }
+        }
+        if shaped_cells.iter().all(|(c, _)| *c == ' ') {
+            return;
+        }
+        let shaped = self.text.shape(&shaped_cells, style);
+        for &Shaped { face, glyph, col, x, y: gy } in shaped.iter() {
+            let Some(g) = self.glyph_entry(face, glyph) else { continue };
+            if g.w == 0 {
+                continue;
+            }
+            let px = (x0 + col as f32 * cw + x + g.left).round();
+            let py = (y + self.text.baseline - gy - g.top).round();
+            self.instances.push(Instance {
+                pos: [px, py],
+                size: [g.w as f32, g.h as f32],
+                uv_pos: [g.x as f32, g.y as f32],
+                uv_size: [g.w as f32, g.h as f32],
+                color,
+                kind: 1,
+                _pad: [0; 3],
+            });
+        }
+    }
+
+    fn box_drawing(&mut self, [up, right, down, left]: [u8; 4], x: f32, y: f32, color: [f32; 4]) {
+        let (cw, ch) = (self.text.cell_w, self.text.cell_h);
+        let light = (self.scale).round().max(1.0);
+        let thick = |w: u8| if w == 2 { light * 2.0 } else { light };
+        let (cx, cy) = ((x + cw / 2.0).floor(), (y + ch / 2.0).floor());
+        let hw = thick(left.max(right));
+        let vw = thick(up.max(down));
+        if left > 0 { self.rect(x, cy - (thick(left) / 2.0).floor(), cx - x + vw / 2.0, thick(left), color); }
+        if right > 0 { self.rect(cx - (vw / 2.0).floor(), cy - (thick(right) / 2.0).floor(), x + cw - cx + (vw / 2.0).floor(), thick(right), color); }
+        if up > 0 { self.rect(cx - (thick(up) / 2.0).floor(), y, thick(up), cy - y + hw / 2.0, color); }
+        if down > 0 { self.rect(cx - (thick(down) / 2.0).floor(), cy - (hw / 2.0).floor(), thick(down), y + ch - cy + (hw / 2.0).floor(), color); }
+    }
+
+    /// Draw plain UI text (tab titles) clipped to max_x.
+    pub fn text(&mut self, s: &str, x: f32, y: f32, max_x: f32, color: [f32; 4]) {
+        let fit = ((max_x - x) / self.text.cell_w).floor().max(0.0) as usize;
+        let cells: Vec<(char, u16)> = s.chars().take(fit).enumerate().map(|(i, c)| (c, i as u16)).collect();
+        self.run(&cells, text::REGULAR, x, y, color);
+    }
+
+    fn glyph_entry(&mut self, face: u16, glyph: u16) -> Option<GlyphEntry> {
+        if let Some(e) = self.glyphs.get(&(face, glyph)) {
+            return Some(*e);
+        }
+        let entry = match self.text.rasterize(face, glyph) {
+            Some(r) if r.width > 0 && r.height > 0 => {
+                let (w, h) = (r.width, r.height);
+                if self.shelf_x + w + 1 > ATLAS_SIZE {
+                    self.shelf_x = 0;
+                    self.shelf_y += self.shelf_h + 1;
+                    self.shelf_h = 0;
+                }
+                if self.shelf_y + h + 1 > ATLAS_SIZE {
+                    // Atlas full: start over. Glyphs get re-rasterized lazily.
+                    self.glyphs.clear();
+                    self.shelf_x = 0;
+                    self.shelf_y = 0;
+                    self.shelf_h = 0;
+                }
+                let (x, y) = (self.shelf_x, self.shelf_y);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &self.atlas_tex, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                    &r.data,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+                self.shelf_x += w + 1;
+                self.shelf_h = self.shelf_h.max(h);
+                GlyphEntry { x, y, w, h, left: r.left as f32, top: r.top as f32 }
+            }
+            _ => GlyphEntry { x: 0, y: 0, w: 0, h: 0, left: 0.0, top: 0.0 },
+        };
+        self.glyphs.insert((face, glyph), entry);
+        Some(entry)
+    }
+
+    /// Submit the frame. `clear` is the (non-premultiplied) window background color incl. alpha.
+    pub fn present(&mut self, clear: [f32; 4]) {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.surface_cfg);
+                return;
+            }
+            _ => return,
+        };
+
+        if self.instances.len() > self.instance_cap {
+            self.instance_cap = self.instances.len().next_power_of_two();
+            self.instance_buf = Self::make_instance_buf(&self.device, self.instance_cap);
+        }
+        self.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&self.instances));
+        let globals = Globals { screen: [self.surface_cfg.width as f32, self.surface_cfg.height as f32], atlas: [ATLAS_SIZE as f32; 2] };
+        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        let view = frame.texture.create_view(&Default::default());
+        let a = if self.transparent { clear[3] } else { 1.0 };
+        // PreMultiplied surfaces (e.g. DX12/Vulkan) need premultiplied clear; PostMultiplied (Metal) needs straight.
+        let k = if self.premultiplied { a } else { 1.0 };
+        let clear_color = wgpu::Color { r: (clear[0] * k) as f64, g: (clear[1] * k) as f64, b: (clear[2] * k) as f64, a: a as f64 };
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear_color), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+            pass.draw(0..4, 0..self.instances.len() as u32);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
+    }
+}

@@ -1,0 +1,39 @@
+[package]
+name = "lumen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+winit = "0.30"
+# Only the native backends: Metal (macOS), DX12 (Windows), Vulkan (+GL on Linux for old GPUs/VMs).
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl", "metal", "dx12", "vulkan"] }
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+swash = "0.2"
+memmap2 = "0.9"
+fontdb = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+parking_lot = "0.12"
+arboard = "3"
+dirs = "6"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["gles"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+window-vibrancy = "0.6"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
