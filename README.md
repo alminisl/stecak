@@ -38,7 +38,11 @@ On macOS this installs `Stećak.app` plus a `stecak` command. On Linux it instal
 cargo install --git https://github.com/alminisl/stecak
 ```
 
-Stećak checks GitHub for a newer release when it starts and offers a download. It doesn't install anything by itself. Turn it off with `check_for_updates: false`.
+**Updates:** Stećak checks GitHub for a newer release at launch, and you can also use **Stećak › Check for Updates…**. On macOS, **Update now** downloads the new DMG, verifies its SHA-256 against the checksum GitHub publishes, swaps the app in place, and offers **Restart**. If the app can't update in place, it opens the release page instead. Turn the launch check off with `check_for_updates: false`.
+
+**Menu bar (macOS):** the Stećak, File, Edit, View, Window and Help menus hold every action, including **Settings…** (⌘,), **Open Config File**, **Sessions…** and **Keyboard Shortcuts** (⌘/).
+
+**Welcome screen:** each launch shows a stećak drawn in text and an inscription formula from the stones. Turn it off in Settings or with `welcome: false`.
 
 Run `stecak` for your login shell, or `stecak -e htop` to run a command instead.
 

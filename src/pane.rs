@@ -33,8 +33,14 @@ pub enum UserEvent {
     BackgroundImage(Option<(Vec<u8>, u32, u32)>),
     /// A pane rang the bell or sent a desktop notification (agents waiting for input).
     Notify(PaneId, Option<String>),
-    /// A newer release exists: (version, release page URL).
-    UpdateAvailable(String, String),
+    /// A newer release exists.
+    UpdateAvailable(crate::update::Release),
+    /// A menu bar item was chosen (its id).
+    Menu(String),
+    /// A manual update check found nothing newer (None), or failed (Some(reason)).
+    UpdateNone(Option<String>),
+    /// An in-place install finished: the app bundle to relaunch, or why it failed.
+    UpdateInstalled(Result<std::path::PathBuf, String>),
     /// One step of a scripted UI session (STECAK_DEMO), used for automated visual tests.
     Demo(String),
 }
@@ -150,6 +156,7 @@ impl Pane {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "stecak");
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         match cwd.map(Path::to_path_buf).or_else(dirs::home_dir) {
             Some(dir) if dir.is_dir() => cmd.cwd(dir),
             _ => {}
@@ -242,6 +249,13 @@ impl Pane {
     pub fn display_title(&self) -> String {
         let t = self.title.lock();
         if t.is_empty() { "shell".to_string() } else { t.clone() }
+    }
+
+    /// Show text in the pane as if the program had printed it (the welcome screen).
+    pub fn inject(&self, bytes: &[u8]) {
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut *self.term.lock(), bytes);
+        self.fresh.store(true, Ordering::Release);
     }
 
     /// Name of the pane's foreground process (e.g. "claude" while an agent runs).

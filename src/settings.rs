@@ -20,6 +20,10 @@ pub enum Item {
     ImageFit,
     Scrollback,
     OptionAsAlt,
+    AlwaysShowTabs,
+    Welcome,
+    AgentNotifications,
+    CheckUpdates,
     Shortcuts,
     OpenFile,
 }
@@ -39,6 +43,10 @@ pub const ITEMS: &[Item] = &[
     Item::ImageFit,
     Item::Scrollback,
     Item::OptionAsAlt,
+    Item::AlwaysShowTabs,
+    Item::Welcome,
+    Item::AgentNotifications,
+    Item::CheckUpdates,
     Item::Shortcuts,
     Item::OpenFile,
 ];
@@ -83,6 +91,10 @@ impl Item {
             Item::ImageFit => "  Image fit",
             Item::Scrollback => "Scrollback lines",
             Item::OptionAsAlt => "Option key as Alt",
+            Item::AlwaysShowTabs => "Always show tab bar",
+            Item::Welcome => "Welcome screen at launch",
+            Item::AgentNotifications => "Agent notifications",
+            Item::CheckUpdates => "Check for updates at launch",
             Item::Shortcuts => "Keyboard shortcuts…",
             Item::OpenFile => "Open config file…",
         }
@@ -106,6 +118,10 @@ impl Item {
             Item::ImageFit => c.background_image.fit.clone(),
             Item::Scrollback => format!("{}", c.scrollback),
             Item::OptionAsAlt => on_off(c.option_as_alt),
+            Item::AlwaysShowTabs => on_off(c.tabs.always_show),
+            Item::Welcome => on_off(c.welcome),
+            Item::AgentNotifications => on_off(c.agent.notifications),
+            Item::CheckUpdates => on_off(c.check_for_updates),
             Item::Shortcuts => if cfg!(target_os = "macos") { "⌘/".into() } else { "Ctrl+Shift+/".into() },
             Item::OpenFile => crate::config::find_config_path().map_or("creates ~/.config/stecak/config.yaml".into(), |p| crate::browser::tilde(&p)),
         }
@@ -136,6 +152,10 @@ impl Item {
             }
             Item::Scrollback => c.scrollback = (c.scrollback as i64 + 1000 * dir as i64).clamp(0, 100_000) as usize,
             Item::OptionAsAlt => c.option_as_alt = !c.option_as_alt,
+            Item::AlwaysShowTabs => c.tabs.always_show = !c.tabs.always_show,
+            Item::Welcome => c.welcome = !c.welcome,
+            Item::AgentNotifications => c.agent.notifications = !c.agent.notifications,
+            Item::CheckUpdates => c.check_for_updates = !c.check_for_updates,
             Item::OpenFile | Item::Shortcuts => return false,
         }
         true

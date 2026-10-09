@@ -1,6 +1,6 @@
 [package]
 name = "stecak"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "A fast, lightweight GPU terminal emulator"
 license = "MIT"
@@ -38,6 +38,8 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# Native menu bar (Stećak / File / Edit / View / Window / Help).
+muda = { version = "0.21", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["gles"] }
