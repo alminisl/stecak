@@ -169,6 +169,7 @@ agent:
   notifications: true
   ask_command: claude -p --model haiku   # one-shot command for ⌘I; the prompt is appended
 restore_session: true    # reopen tabs, splits, folders and agent sessions at launch
+                         # (Settings › "Restore sessions at launch"; off also forgets the saved one)
 shell_integration: true  # zsh reports each command and its exit status (OSC 133)
 editor: ""               # for ⌘-click on file:line; empty = VS Code / Cursor / Zed / default app
                          # e.g. "nvim +{line} {file}" (terminal editors open in a new tab)

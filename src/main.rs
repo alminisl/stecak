@@ -392,6 +392,11 @@ impl App {
     }
 
     fn apply_config(&mut self, new: Config) {
+        // Turning session restore off forgets the saved one, so switching it back on later
+        // doesn't bring back an old session.
+        if self.config.restore_session && !new.restore_session && self.owns_session() {
+            restore::save(&restore::Saved { active: 0, tabs: Vec::new() }, self.config_dir());
+        }
         let font_changed = new.font != self.config.font || new.bosancica.font != self.config.bosancica.font;
         let image_changed = new.background_image.path != self.config.background_image.path || new.background_image.fit != self.config.background_image.fit;
         self.config = new;
@@ -645,10 +650,15 @@ impl App {
 
     // ---- session restore -----------------------------------------------------------------
 
-    /// Scripted runs restore only with their own config dir, never touching your session.
-    fn restoring_enabled(&self) -> bool {
+    /// Whether this run may read or write the saved session: not `stecak -e …`, and scripted
+    /// runs only with their own config dir, so they never touch yours.
+    fn owns_session(&self) -> bool {
         let demo = std::env::var_os("STECAK_DEMO").is_some() && std::env::var_os("STECAK_CONFIG").is_none();
-        self.config.restore_session && self.cli_shell.is_none() && !demo
+        self.cli_shell.is_none() && !demo
+    }
+
+    fn restoring_enabled(&self) -> bool {
+        self.config.restore_session && self.owns_session()
     }
 
     fn config_dir(&self) -> &std::path::Path {
@@ -1062,7 +1072,7 @@ impl App {
                     log::info!("dump palette: {:?}", self.palette.visible().iter().take(5).map(|e| &e.label).collect::<Vec<_>>());
                 }
                 if self.settings.open {
-                    log::info!("dump settings: {:?}", self.settings.rows(&self.config).take(3).map(|(l, v, _)| format!("{l}={v}")).collect::<Vec<_>>());
+                    log::info!("dump settings: {:?}", self.settings.rows(&self.config).filter(|r| r.2).map(|(l, v, _)| format!("{l}={v}")).collect::<Vec<_>>());
                 }
                 if self.ask.open {
                     log::info!("dump ask: busy={} error={:?}", self.ask.busy, self.ask.error);
