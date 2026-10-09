@@ -47,7 +47,7 @@ wgpu = { version = "30", default-features = false, features = ["gles"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.6"
 # Process snapshots: which program runs in a pane (agents, session restore).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Controls"] }
 
 # Embeds the .exe icon (build.rs).
 [target.'cfg(windows)'.build-dependencies]
