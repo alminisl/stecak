@@ -36,7 +36,8 @@
   h2 { font-size: clamp(34px, 5vw, 52px); }
   h3 { font-size: 28px; }
   code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+  @media (min-width: 861px) { .wrap { padding: 0 24px; } }
   section { padding: 96px 0; }
 
   /* Hero: the Radimlja necropolis under a night tint. */
@@ -99,6 +100,50 @@
   footer { border-top: 1px solid var(--line); padding: 40px 0 56px; color: var(--muted); font-size: 14px; }
   footer p { margin: 6px 0; }
 
+
+  /* Benchmarks: hand-built bar charts. Palette validated for the dark surface (OKLCH band,
+     chroma, CVD and normal-vision separation, contrast): Stećak #cf7a30, Ghostty #4f78d6. */
+  .bench { --s-stecak: #cf7a30; --s-ghostty: #4f78d6; --s-other: #5b6275; --reserve: 230px; }
+  .bench .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .chart { background: var(--night-2); border: 1px solid var(--line); border-radius: 16px; padding: 24px 24px 18px; margin-bottom: 24px; }
+  .chart h3 { font-family: "IBM Plex Sans", sans-serif; font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .chart .sub { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  .legend { display: flex; gap: 18px; font-size: 14px; color: var(--muted); margin: -6px 0 14px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .row { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: center; gap: 12px; padding: 5px 0; cursor: default; }
+  .row .lbl { font-size: 14px; color: #d5d3cd; overflow-wrap: anywhere; }
+  .row.wl { grid-template-columns: 230px minmax(0, 1fr); }
+  .row.wl .lbl { font-family: "JetBrains Mono", monospace; font-size: 13px; }
+  .bars { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .barline { display: flex; align-items: center; gap: 8px; min-height: 18px; }
+  .bar { height: 14px; min-width: 4px; flex-shrink: 0; border-radius: 0 4px 4px 0; background: var(--s-other); }
+  .bar.stecak { background: var(--s-stecak); }
+  .bar.ghostty { background: var(--s-ghostty); }
+  .bar.tall { height: 22px; }
+  .val { font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .val b { color: var(--ink); font-weight: 600; }
+  .row:hover .bar, .row:focus-visible .bar { filter: brightness(1.15); }
+  .row:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 6px; }
+  details { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  details summary { cursor: pointer; }
+  details table { border-collapse: collapse; width: 100%; margin-top: 10px; font-family: "JetBrains Mono", monospace; font-size: 13px; color: #d5d3cd; }
+  details th, details td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  details th:first-child, details td:first-child { text-align: left; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .tile { background: var(--night); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .tile b { display: block; font-family: "JetBrains Mono", monospace; font-size: 40px; line-height: 1.1; }
+  .tile span { color: var(--muted); font-size: 14px; }
+  #tip { position: fixed; pointer-events: none; background: #0c0e14; color: var(--ink); border: 1px solid var(--line);
+         border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.4; opacity: 0; transition: opacity .1s; z-index: 10; max-width: 260px; }
+  @media (max-width: 860px) {
+    .bench .grid2, .tiles { grid-template-columns: 1fr; }
+    .bench { --reserve: 120px; }
+    .row { grid-template-columns: 96px minmax(0, 1fr); }
+    .row.wl { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .val { white-space: normal; }
+    .chart { padding: 18px 16px 14px; }
+  }
+
   @media (max-width: 860px) {
     .stats, .facts { grid-template-columns: 1fr; }
     .two { grid-template-columns: 1fr; gap: 32px; }
@@ -117,6 +162,7 @@
     <div class="buttons">
       <a class="btn primary" href="https://github.com/alminisl/stecak/releases/latest">Download for macOS (.dmg)</a>
       <a class="btn ghost" href="https://github.com/alminisl/stecak">View on GitHub</a>
+      <a class="btn ghost" href="#benchmarks">Benchmarks</a>
       <a class="btn ghost" href="#heritage">What is a stećak?</a>
     </div>
   </div>
@@ -149,6 +195,63 @@
           <li>Background images, like iTerm2</li>
           <li>Settings page and live-reloading config</li>
         </ul>
+      </div>
+    </div>
+  </section>
+
+
+  <section id="benchmarks" class="bench" style="padding-top:0">
+    <div class="wrap">
+      <h2>Benchmarks</h2>
+      <p class="note" style="max-width:820px">Measured on an Apple M5 running macOS, in one sitting, at a window size of about 100×30.
+      <a href="https://github.com/alacritty/vtebench">vtebench</a> (from the Alacritty project) times how fast a terminal reads and processes program output. Lower is better everywhere.
+      It doesn't measure keypress latency or frame pacing. iTerm2 does far more than Stećak, and features cost speed and memory.</p>
+
+      <div class="grid2">
+        <div class="chart" role="img" aria-label="vtebench totals: Stećak 141 ms, Ghostty 191 ms, Terminal.app 2,611 ms, iTerm2 12,383 ms">
+          <h3>Read throughput: vtebench total</h3>
+          <p class="sub">Sum of 10 workloads, ms per MiB · bars to scale</p>
+<div class="row" tabindex="0" data-tip="Stećak — Stećak: 141.1 ms"><span class="lbl">Stećak</span><div class="bars"><div class="barline"><div class="bar stecak tall" style="width:calc((100% - var(--reserve)) * 0.0114)"></div><span class="val"><b>141.1</b> ms · fastest</span></div></div></div>
+<div class="row" tabindex="0" data-tip="Ghostty — Ghostty: 191.5 ms"><span class="lbl">Ghostty</span><div class="bars"><div class="barline"><div class="bar  tall" style="width:calc((100% - var(--reserve)) * 0.0155)"></div><span class="val"><b>191.5</b> ms · 1.4× slower</span></div></div></div>
+<div class="row" tabindex="0" data-tip="Terminal.app — Terminal.app: 2,610.8 ms"><span class="lbl">Terminal.app</span><div class="bars"><div class="barline"><div class="bar  tall" style="width:calc((100% - var(--reserve)) * 0.2108)"></div><span class="val"><b>2,610.8</b> ms · 18× slower</span></div></div></div>
+<div class="row" tabindex="0" data-tip="iTerm2 — iTerm2: 12,382.6 ms"><span class="lbl">iTerm2</span><div class="bars"><div class="barline"><div class="bar  tall" style="width:calc((100% - var(--reserve)) * 1.0000)"></div><span class="val"><b>12,382.6</b> ms · 88× slower</span></div></div></div>
+          <details><summary>Show data table</summary><table><tr><th>Terminal</th><th>ms (sum of means)</th></tr><tr><td>Stećak</td><td>141.1</td></tr><tr><td>Ghostty</td><td>191.5</td></tr><tr><td>Terminal.app</td><td>2,610.8</td></tr><tr><td>iTerm2</td><td>12,382.6</td></tr></table></details>
+        </div>
+        <div class="chart" role="img" aria-label="Memory per window: Stećak 33 MB, Terminal.app 52 MB, iTerm2 79 MB added, Ghostty 139 MB">
+          <h3>Memory per window</h3>
+          <p class="sub">macOS phys_footprint, MB · Ghostty and Terminal.app sampled once, 4 s after launch</p>
+<div class="row" tabindex="0" data-tip="Stećak — Stećak: 33.0 MB"><span class="lbl">Stećak</span><div class="bars"><div class="barline"><div class="bar stecak tall" style="width:calc((100% - var(--reserve)) * 0.2374)"></div><span class="val"><b>33.0</b> MB · steady (51 MB at 4 s)</span></div></div></div>
+<div class="row" tabindex="0" data-tip="Terminal.app — Terminal.app: 52.0 MB"><span class="lbl">Terminal.app</span><div class="bars"><div class="barline"><div class="bar  tall" style="width:calc((100% - var(--reserve)) * 0.3741)"></div><span class="val"><b>52.0</b> MB · at 4 s</span></div></div></div>
+<div class="row" tabindex="0" data-tip="iTerm2 — iTerm2: 79.0 MB"><span class="lbl">iTerm2</span><div class="bars"><div class="barline"><div class="bar  tall" style="width:calc((100% - var(--reserve)) * 0.5683)"></div><span class="val"><b>79.0</b> MB · added per window</span></div></div></div>
+<div class="row" tabindex="0" data-tip="Ghostty — Ghostty: 139.0 MB"><span class="lbl">Ghostty</span><div class="bars"><div class="barline"><div class="bar  tall" style="width:calc((100% - var(--reserve)) * 1.0000)"></div><span class="val"><b>139.0</b> MB · at 4 s</span></div></div></div>
+          <details><summary>Show data table</summary><table><tr><th>Terminal</th><th>MB</th><th>How measured</th></tr><tr><td>Stećak</td><td>33</td><td>steady state, 1 window (51 MB at 4 s)</td></tr><tr><td>Terminal.app</td><td>52</td><td>fresh process, 4 s after launch</td></tr><tr><td>iTerm2</td><td>+79</td><td>added by one window to a running app</td></tr><tr><td>Ghostty</td><td>139</td><td>fresh instance, 4 s after launch</td></tr></table></details>
+        </div>
+      </div>
+
+      <div class="chart" role="img" aria-label="Per-workload vtebench results, Stećak versus Ghostty">
+        <h3>Per workload: Stećak vs Ghostty</h3>
+        <p class="sub">ms per MiB · Stećak is faster in 6 of 10 workloads, Ghostty in 4 · iTerm2 and Terminal.app are off this scale (see table)</p>
+        <div class="legend"><span><i style="background:var(--s-stecak)"></i>Stećak</span><span><i style="background:var(--s-ghostty)"></i>Ghostty</span></div>
+<div class="row wl" tabindex="0" data-tip="dense_cells — Stećak: 4.3 ms · Ghostty: 12.8 ms"><span class="lbl">dense_cells</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.1377)"></div><span class="val"><b>4.3</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.4132)"></div><span class="val"><b>12.8</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="medium_cells — Stećak: 6.2 ms · Ghostty: 13.6 ms"><span class="lbl">medium_cells</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.2016)"></div><span class="val"><b>6.2</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.4397)"></div><span class="val"><b>13.6</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="scrolling — Stećak: 9.5 ms · Ghostty: 30.9 ms"><span class="lbl">scrolling</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.3077)"></div><span class="val"><b>9.5</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.9955)"></div><span class="val"><b>30.9</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="scrolling_bottom_region — Stećak: 9.7 ms · Ghostty: 21.2 ms"><span class="lbl">scrolling_bottom_region</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.3139)"></div><span class="val"><b>9.7</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.6839)"></div><span class="val"><b>21.2</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="scrolling_bottom_small_region — Stećak: 10.2 ms · Ghostty: 21.9 ms"><span class="lbl">scrolling_bottom_small_region</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.3300)"></div><span class="val"><b>10.2</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.7074)"></div><span class="val"><b>21.9</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="scrolling_fullscreen — Stećak: 14.9 ms · Ghostty: 30.7 ms"><span class="lbl">scrolling_fullscreen</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.4810)"></div><span class="val"><b>14.9</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.9916)"></div><span class="val"><b>30.7</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="scrolling_top_region — Stećak: 31.0 ms · Ghostty: 23.4 ms"><span class="lbl">scrolling_top_region</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.9987)"></div><span class="val"><b>31.0</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.7565)"></div><span class="val"><b>23.4</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="scrolling_top_small_region — Stećak: 24.1 ms · Ghostty: 18.9 ms"><span class="lbl">scrolling_top_small_region</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.7781)"></div><span class="val"><b>24.1</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.6094)"></div><span class="val"><b>18.9</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="sync_medium_cells — Stećak: 18.5 ms · Ghostty: 11.8 ms"><span class="lbl">sync_medium_cells</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.5981)"></div><span class="val"><b>18.5</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.3819)"></div><span class="val"><b>11.8</b> ms</span></div></div></div>
+<div class="row wl" tabindex="0" data-tip="unicode — Stećak: 12.6 ms · Ghostty: 6.1 ms"><span class="lbl">unicode</span><div class="bars"><div class="barline"><div class="bar stecak" style="width:calc((100% - var(--reserve)) * 0.4058)"></div><span class="val"><b>12.6</b> ms</span></div><div class="barline"><div class="bar ghostty" style="width:calc((100% - var(--reserve)) * 0.1977)"></div><span class="val"><b>6.1</b> ms</span></div></div></div>
+        <details><summary>Show data table</summary><table><tr><th>Workload</th><th>Stećak</th><th>Ghostty</th><th>Terminal.app</th><th>iTerm2</th></tr><tr><td>dense_cells</td><td>4.3</td><td>12.8</td><td>20.3</td><td>112.3</td></tr><tr><td>medium_cells</td><td>6.2</td><td>13.6</td><td>36.8</td><td>1,398.3</td></tr><tr><td>scrolling</td><td>9.5</td><td>30.9</td><td>136.8</td><td>1,194.0</td></tr><tr><td>scrolling_bottom_region</td><td>9.7</td><td>21.2</td><td>116.1</td><td>1,351.7</td></tr><tr><td>scrolling_bottom_small_region</td><td>10.2</td><td>21.9</td><td>114.7</td><td>1,408.7</td></tr><tr><td>scrolling_fullscreen</td><td>14.9</td><td>30.7</td><td>140.6</td><td>679.2</td></tr><tr><td>scrolling_top_region</td><td>31.0</td><td>23.4</td><td>270.9</td><td>3,264.0</td></tr><tr><td>scrolling_top_small_region</td><td>24.1</td><td>18.9</td><td>437.0</td><td>1,441.7</td></tr><tr><td>sync_medium_cells</td><td>18.5</td><td>11.8</td><td>156.2</td><td>1,416.7</td></tr><tr><td>unicode</td><td>12.6</td><td>6.1</td><td>1,181.5</td><td>116.1</td></tr></table></details>
+      </div>
+
+      <div class="chart">
+        <h3>Bulk output: cat of a 34 MB colored text file</h3>
+        <p class="sub">Mean of 3 runs, wall-clock time · the screen kept updating throughout</p>
+        <div class="tiles">
+          <div class="tile"><b style="color:var(--amber)">0.38 s</b><span>Stećak</span></div>
+          <div class="tile"><b>4.70 s</b><span>iTerm2, 12× slower</span></div>
+        </div>
       </div>
     </div>
   </section>
@@ -215,5 +318,17 @@
   </div>
 </footer>
 
+<div id="tip" role="tooltip"></div>
+<script>
+  // One shared tooltip for every bar row: follows the pointer, and shows on keyboard focus too.
+  const tip = document.getElementById("tip");
+  const show = (el, x, y) => { tip.textContent = el.dataset.tip; tip.style.left = (x + 14) + "px"; tip.style.top = (y + 14) + "px"; tip.style.opacity = 1; };
+  document.querySelectorAll(".row[data-tip]").forEach(el => {
+    el.addEventListener("pointermove", e => show(el, e.clientX, e.clientY));
+    el.addEventListener("pointerleave", () => tip.style.opacity = 0);
+    el.addEventListener("focus", () => { const r = el.getBoundingClientRect(); show(el, r.left + 120, r.top); });
+    el.addEventListener("blur", () => tip.style.opacity = 0);
+  });
+</script>
 </body>
 </html>
