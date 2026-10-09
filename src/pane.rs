@@ -150,31 +150,27 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
-        let default_shell = std::env::var("SHELL").unwrap_or_default();
-        let integration_shell = if command.is_some() || !config.shell_integration {
-            ""
-        } else if config.shell.program.is_empty() {
-            default_shell.as_str()
-        } else {
-            config.shell.program.as_str()
-        };
+        let (shell, shell_args) = crate::shell::interactive(config);
+        let integration_shell = if command.is_some() || !config.shell_integration { "" } else { shell.as_str() };
         let mut cmd = if let Some(command) = command {
-            // Run through the login shell, with the PATH your interactive shell sets up
-            // (npm, ~/.local/bin…), which a login shell alone may not have.
-            let shell = if config.shell.program.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()) } else { config.shell.program.clone() };
-            let mut c = CommandBuilder::new(shell);
-            c.args(["-lc", command]);
+            // Through the shell, with the PATH your interactive shell sets up (npm,
+            // ~/.local/bin…), which a login shell alone may not have.
+            let (program, args) = crate::shell::pane_command(command, config);
+            let mut c = CommandBuilder::new(program);
+            c.args(&args);
             if let Some(path) = crate::ai::user_path() {
                 c.env("PATH", path);
             }
             c
-        } else if config.shell.program.is_empty() {
-            CommandBuilder::new_default_prog()
-        } else {
-            let mut c = CommandBuilder::new(&config.shell.program);
-            c.args(&config.shell.args);
+        } else if cfg!(windows) || !config.shell.program.is_empty() {
+            let mut c = CommandBuilder::new(&shell);
+            c.args(&shell_args);
             c
+        } else {
+            CommandBuilder::new_default_prog()
         };
+        // Where a restored agent pane goes when you quit the agent (`shell::then_shell`).
+        cmd.env("STECAK_SHELL", &shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "stecak");
@@ -293,7 +289,9 @@ impl Pane {
     pub fn foreground_process(&self) -> Option<String> {
         #[cfg(unix)]
         return self.master.process_group_leader().and_then(crate::agents::process_name);
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        return crate::agents::foreground(self.child.process_id()?).map(|p| p.1);
+        #[cfg(not(any(unix, windows)))]
         None
     }
 
@@ -301,7 +299,9 @@ impl Pane {
     pub fn foreground_pid(&self) -> Option<i32> {
         #[cfg(unix)]
         return self.master.process_group_leader();
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        return crate::agents::foreground(self.child.process_id()?).map(|p| p.0 as i32);
+        #[cfg(not(any(unix, windows)))]
         None
     }
 

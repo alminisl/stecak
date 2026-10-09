@@ -163,7 +163,7 @@ pub fn context_snippet(selection: &str, cwd: Option<&Path>) -> String {
 }
 
 fn command_prompt(task: &str, cwd: Option<&Path>) -> String {
-    let shell = std::env::var("SHELL").ok().and_then(|s| s.rsplit('/').next().map(str::to_string)).unwrap_or_else(|| "sh".into());
+    let shell = crate::shell::name();
     let os = if cfg!(target_os = "macos") { "macOS" } else { std::env::consts::OS };
     let wd = cwd.map(|p| format!("The working directory is {}. ", p.display())).unwrap_or_default();
     format!(
@@ -186,32 +186,45 @@ pub fn clean_command(reply: &str, multiline_ok: bool) -> String {
     if multiline_ok { lines.join("\n") } else { lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" && ") }
 }
 
-/// Run `command "<prompt>"` (e.g. `claude -p --model haiku`) through the login shell on a
-/// worker thread, so PATH matches your terminal. The reply arrives as `UserEvent::AiReply`.
+/// Run `command "<prompt>"` (e.g. `claude -p --model haiku`) on a worker thread, the way your
+/// shell would (see `shell::background`). The reply arrives as `UserEvent::AiReply`.
 pub fn ask_async(command: &str, task: &str, cwd: Option<PathBuf>, pane: PaneId, generation: u64, proxy: EventLoopProxy<UserEvent>) {
     let prompt = command_prompt(task, cwd.as_deref());
-    let script = format!("{command} \"$STECAK_PROMPT\"");
+    let command = command.to_string();
     let _ = std::thread::Builder::new().name("ai-ask".into()).spawn(move || {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let mut cmd = std::process::Command::new(shell);
-        cmd.args(["-lc", &script]).env("STECAK_PROMPT", prompt).stdin(std::process::Stdio::null());
-        if let Some(path) = user_path() {
-            cmd.env("PATH", path);
-        }
-        if let Some(dir) = cwd.filter(|d| d.is_dir()) {
-            cmd.current_dir(dir);
-        }
-        let result = match cmd.output() {
-            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-            Ok(out) => {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no output");
-                Err(format!("`{}` failed: {}", script.split_whitespace().next().unwrap_or(""), line.trim()))
+        let program = command.split_whitespace().next().unwrap_or("").to_string();
+        let result = match crate::shell::background(&command, Some(&prompt)) {
+            None => Err("Ask AI: `agent.ask_command` is empty".to_string()),
+            Some(mut cmd) => {
+                cmd.stdin(std::process::Stdio::null());
+                if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+                    cmd.current_dir(dir);
+                }
+                match cmd.output() {
+                    Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr);
+                        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no output");
+                        Err(format!("`{program}` failed: {}", line.trim()))
+                    }
+                    Err(e) => Err(format!("`{program}`: {e}")),
+                }
             }
-            Err(e) => Err(e.to_string()),
         };
         let _ = proxy.send_event(UserEvent::AiReply(pane, generation, result));
     });
+}
+
+/// Windows: run a background command without popping up a console window (Stećak is a GUI
+/// app there, so each console child would otherwise get its own window).
+pub fn no_console(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 // ---- the user's PATH ---------------------------------------------------------------------
@@ -234,8 +247,13 @@ pub fn warm_user_path() {
 
 fn resolve_user_path() -> Option<String> {
     use std::io::Read;
+    // Windows apps inherit the user's PATH from the registry; a Git Bash `$SHELL` would
+    // only hand back a POSIX-style one.
+    if cfg!(windows) {
+        return None;
+    }
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
-    let mut child = std::process::Command::new(shell)
+    let mut child = no_console(&mut std::process::Command::new(shell))
         .args(["-ilc", "printf '\\n__STECAK_PATH__%s\\n' \"$PATH\""])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

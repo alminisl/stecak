@@ -59,7 +59,7 @@ pub fn resume_command(process: &str, claude_session: Option<&str>) -> Option<Str
     } else {
         return None;
     };
-    Some(format!("{agent}; exec \"$SHELL\" -l"))
+    Some(crate::shell::then_shell(&agent))
 }
 
 /// Kept next to the config file (`~/.config/stecak/session.json`).
@@ -110,7 +110,7 @@ mod tests {
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Saved>(&text).unwrap(), s);
         assert_eq!(resume_command("zsh", None), None);
-        assert_eq!(resume_command("claude", Some("abc-1")).as_deref(), Some("claude --resume abc-1; exec \"$SHELL\" -l"));
-        assert_eq!(resume_command("codex", None).as_deref(), Some("codex resume --last; exec \"$SHELL\" -l"));
+        assert_eq!(resume_command("claude", Some("abc-1")), Some(crate::shell::then_shell("claude --resume abc-1")));
+        assert_eq!(resume_command("codex", None), Some(crate::shell::then_shell("codex resume --last")));
     }
 }

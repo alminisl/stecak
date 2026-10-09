@@ -25,3 +25,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev fontconfig fonts-dejavu-core
       - run: cargo build --release
       - run: cargo test --release
+      # A Windows build and installer for every push, without tagging a release
+      # (Actions → the run → Artifacts).
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=0.0.0-dev" /DArch=x64 installer\stecak.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: stecak-windows-x64
+          path: |
+            target/release/stecak.exe
+            dist/*-setup.exe
