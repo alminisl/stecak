@@ -69,6 +69,9 @@ enum UpdateUi {
 struct Tab {
     root: Node,
     focus: PaneId,
+    /// Room is kept for the context bar (a Claude Code session was seen in this tab). Per
+    /// tab, so switching tabs never resizes panes, which would make idle agents redraw.
+    context_bar: bool,
 }
 
 /// The Claude Code session the context bar is showing.
@@ -168,6 +171,8 @@ struct App {
     context_checked: Option<(Instant, usize, Option<PaneId>, bool)>,
     context_hover: bool,
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
+    /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
+    claude_busy: HashMap<PaneId, (Instant, Option<bool>)>,
     /// The macOS menu bar; must stay alive for the app's lifetime.
     #[cfg(target_os = "macos")]
     _menu: Option<muda::Menu>,
@@ -242,6 +247,7 @@ impl App {
             context_checked: None,
             context_hover: false,
             breakdowns: HashMap::new(),
+            claude_busy: HashMap::new(),
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
@@ -267,9 +273,9 @@ impl App {
         self.titlebar_h() + if show { (self.r().cell().1 * 1.7).round() } else { 0.0 }
     }
 
-    /// The context bar under the panes, while a Claude Code session is in the active tab.
-    fn context_bar_h(&self) -> f32 {
-        if self.context.is_some() { (self.r().cell().1 * 1.5).round() } else { 0.0 }
+    /// The context bar under tab `tab`'s panes, while it has a Claude Code session.
+    fn context_bar_h(&self, tab: usize) -> f32 {
+        if self.tabs.get(tab).is_some_and(|t| t.context_bar) { (self.r().cell().1 * 1.5).round() } else { 0.0 }
     }
 
     /// Geometry of every pane in tab `tab`.
@@ -282,7 +288,7 @@ impl App {
         let pad = (self.config.window.padding * r.scale).round();
         let gap = (layout::DIVIDER * r.scale).round().max(1.0);
         let (mut rects, mut dividers) = (vec![], vec![]);
-        let bottom = self.context_bar_h();
+        let bottom = self.context_bar_h(tab);
         t.root.layout(Rect { x: 0.0, y: top, w, h: h - top - bottom }, gap, &mut rects, &mut dividers);
         let geoms = rects
             .into_iter()
@@ -333,7 +339,7 @@ impl App {
 
     fn open_tab(&mut self, command: Option<&str>, cwd: Option<PathBuf>) {
         if let Some(id) = self.spawn_pane(command, cwd) {
-            self.tabs.push(Tab { root: Node::Leaf(id), focus: id });
+            self.tabs.push(Tab { root: Node::Leaf(id), focus: id, context_bar: false });
             self.active = self.tabs.len() - 1;
             self.resize_all();
         }
@@ -536,7 +542,6 @@ impl App {
             return;
         }
         self.context_checked = Some((Instant::now(), key.0, key.1, key.2));
-        let had = self.context.is_some();
         match enabled.then(|| self.claude_in_tab()).flatten() {
             None => self.context = None,
             Some((session, cwd)) => {
@@ -562,7 +567,9 @@ impl App {
                 }
             }
         }
-        if had != self.context.is_some() {
+        let want = self.context.is_some();
+        if let Some(t) = self.tabs.get_mut(self.active).filter(|t| t.context_bar != want) {
+            t.context_bar = want;
             self.resize_all();
         }
     }
@@ -789,7 +796,7 @@ impl App {
                 let mut ids = vec![];
                 root.leaves(&mut ids);
                 let focus = ids.get(t.focus).copied().unwrap_or(ids[0]);
-                self.tabs.push(Tab { root, focus });
+                self.tabs.push(Tab { root, focus, context_bar: false });
             }
         }
         if self.tabs.is_empty() {
@@ -1114,6 +1121,7 @@ impl App {
             "split-v" => self.split(Dir::Vertical, None),
             "tab" => self.new_tab(),
             "pane" => self.cycle_pane(1),
+            "goto" => self.handle_action(Action::SelectTab(arg.parse().unwrap_or(0)), event_loop),
             "type" => self.handle_action(Action::Write(arg.replace("\\n", "\r").into_bytes()), event_loop),
             "find" => {
                 self.handle_action(Action::Find, event_loop);
@@ -1166,6 +1174,8 @@ impl App {
                 if self.ask.open {
                     log::info!("dump ask: busy={} error={:?}", self.ask.busy, self.ask.error);
                 }
+                let statuses = self.statuses();
+                log::info!("dump tabs: active={} statuses={statuses:?}", self.active);
                 if let Some(c) = &self.context {
                     use alacritty_terminal::grid::Dimensions;
                     let b = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
@@ -1448,7 +1458,7 @@ impl App {
             self.hover_tab = hover_tab;
             self.mark_dirty();
         }
-        let over_context = self.context.is_some() && y >= self.r().size().1 - self.context_bar_h();
+        let over_context = self.context.is_some() && y >= self.r().size().1 - self.context_bar_h(self.active);
         if over_context != self.context_hover {
             self.context_hover = over_context;
             self.mark_dirty();
@@ -1586,19 +1596,7 @@ impl App {
                 });
             }
         }
-        let statuses: Vec<(bool, bool)> = self
-            .tabs
-            .iter()
-            .map(|t| {
-                let mut ids = vec![];
-                t.root.leaves(&mut ids);
-                let waiting = ids.iter().any(|id| self.attention.contains(id));
-                let working = ids.iter().filter_map(|id| self.panes.get(id)).any(|p| {
-                    now.saturating_sub(p.last_output.load(Ordering::Acquire)) < 1500 && p.foreground_process().is_some_and(|n| agents::is_agent(&n))
-                });
-                (working, waiting)
-            })
-            .collect();
+        let statuses = self.statuses();
         self.animating = statuses.iter().any(|s| s.0) || self.ask.busy;
 
         // Frame skipping: only panes on screen matter. Output in background tabs (or nothing
@@ -1805,6 +1803,48 @@ impl App {
             w.set_title(&format!("{} — Stećak", p.display_title()));
         }
         self.record_stats(t1 - t0, t1.elapsed(), stats);
+    }
+
+    /// Per tab: an agent is working, and one is waiting on you. Claude Code says whether it's
+    /// busy; other agents count as working while they print (idle Claude Code also redraws
+    /// now and then, e.g. its status line, so output alone would flicker the animation).
+    fn statuses(&mut self) -> Vec<(bool, bool)> {
+        let now = pane::now_ms();
+        let mut ids = vec![];
+        for t in &self.tabs {
+            t.root.leaves(&mut ids);
+        }
+        self.claude_busy.retain(|id, _| self.panes.contains_key(id));
+        let mut working = HashSet::new();
+        for id in ids {
+            let Some(p) = self.panes.get(&id) else { continue };
+            let Some(name) = p.foreground_process().filter(|n| agents::is_agent(n)) else { continue };
+            let printing = now.saturating_sub(p.last_output.load(Ordering::Acquire)) < 1500;
+            let busy = if name.contains("claude") {
+                let busy = match self.claude_busy.get(&id) {
+                    Some(&(t, busy)) if t.elapsed() < Duration::from_millis(500) => busy,
+                    _ => {
+                        let busy = p.foreground_pid().and_then(agents::claude_busy);
+                        self.claude_busy.insert(id, (Instant::now(), busy));
+                        busy
+                    }
+                };
+                busy.unwrap_or(printing)
+            } else {
+                printing
+            };
+            if busy {
+                working.insert(id);
+            }
+        }
+        self.tabs
+            .iter()
+            .map(|t| {
+                let mut ids = vec![];
+                t.root.leaves(&mut ids);
+                (ids.iter().any(|id| working.contains(id)), ids.iter().any(|id| self.attention.contains(id)))
+            })
+            .collect()
     }
 
     fn record_stats(&mut self, build: Duration, present: Duration, rows: DrawStats) {
@@ -2598,6 +2638,8 @@ fn main() {
         Some(ShellConfig { program: program.clone(), args: args[i + 2..].to_vec() })
     });
     log::info!("config path: {}", config_path.display());
+    // Resolve the shell's PATH now, so agent tabs and /context find `claude` without waiting.
+    ai::warm_user_path();
 
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     // Scripted test runs must not steal keyboard focus from whatever the user is doing.

@@ -141,6 +141,9 @@ pub fn fetch_async(cwd: PathBuf, proxy: EventLoopProxy<UserEvent>) {
         let script = r#"claude -p --no-session-persistence --settings '{"disableAllHooks":true}' --output-format json /context"#;
         let mut cmd = std::process::Command::new(shell);
         cmd.args(["-lc", script]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        if let Some(path) = crate::ai::user_path() {
+            cmd.env("PATH", path);
+        }
         if cwd.is_dir() {
             cmd.current_dir(&cwd);
         }

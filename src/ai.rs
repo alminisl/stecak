@@ -195,6 +195,9 @@ pub fn ask_async(command: &str, task: &str, cwd: Option<PathBuf>, pane: PaneId, 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let mut cmd = std::process::Command::new(shell);
         cmd.args(["-lc", &script]).env("STECAK_PROMPT", prompt).stdin(std::process::Stdio::null());
+        if let Some(path) = user_path() {
+            cmd.env("PATH", path);
+        }
         if let Some(dir) = cwd.filter(|d| d.is_dir()) {
             cmd.current_dir(dir);
         }
@@ -209,6 +212,51 @@ pub fn ask_async(command: &str, task: &str, cwd: Option<PathBuf>, pane: PaneId, 
         };
         let _ = proxy.send_event(UserEvent::AiReply(pane, generation, result));
     });
+}
+
+// ---- the user's PATH ---------------------------------------------------------------------
+
+static USER_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// PATH as your interactive shell sets it. An app started from the Dock gets a bare PATH, and
+/// a login shell (`zsh -lc`) skips ~/.zshrc, which is often where ~/.local/bin (claude) is
+/// added. Commands we run ourselves (agents, Ask AI, /context) use this. Blocks until it's
+/// resolved; `warm_user_path` starts that at launch.
+pub fn user_path() -> Option<&'static str> {
+    USER_PATH.get_or_init(resolve_user_path).as_deref()
+}
+
+pub fn warm_user_path() {
+    let _ = std::thread::Builder::new().name("user-path".into()).spawn(|| {
+        user_path();
+    });
+}
+
+fn resolve_user_path() -> Option<String> {
+    use std::io::Read;
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
+    let mut child = std::process::Command::new(shell)
+        .args(["-ilc", "printf '\\n__STECAK_PATH__%s\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // A slow or stuck ~/.zshrc must not hold anything up for long.
+    let start = std::time::Instant::now();
+    while child.try_wait().ok()?.is_none() {
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            let _ = child.kill();
+            log::warn!("reading PATH from the shell timed out");
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let path = out.lines().find_map(|l| l.strip_prefix("__STECAK_PATH__")).filter(|p| !p.is_empty()).map(str::to_string);
+    log::debug!("shell PATH: {path:?}");
+    path
 }
 
 // ---- shell integration -----------------------------------------------------------------

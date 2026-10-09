@@ -225,6 +225,14 @@ pub fn claude_session_id(pid: i32) -> Option<String> {
     claude_session(pid).map(|s| s.0)
 }
 
+/// Whether a running Claude Code process is busy (working on a turn), from the `status` it
+/// keeps in `~/.claude/sessions/<pid>.json`. None if it doesn't say.
+pub fn claude_busy(pid: i32) -> Option<bool> {
+    let path = dirs::home_dir()?.join(".claude/sessions").join(format!("{pid}.json"));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v["status"].as_str().map(|s| s == "busy")
+}
+
 /// The running Claude Code process's session id and folder.
 pub fn claude_session(pid: i32) -> Option<(String, PathBuf)> {
     let path = dirs::home_dir()?.join(".claude/sessions").join(format!("{pid}.json"));
