@@ -15,7 +15,7 @@ The name comes from the *stećci*, the medieval tombstones of Bosnia and Herzego
 
 ## Install
 
-**macOS:** download `Stecak-<version>-macos-universal.dmg` from [Releases](https://github.com/alminisl/ste-ak/releases) and drag Stećak to Applications.
+**macOS:** download `Stecak-<version>-macos-universal.dmg` from [Releases](https://github.com/alminisl/stecak/releases) and drag Stećak to Applications.
 The app isn't notarized yet, so on first launch right-click it and choose **Open**, or run:
 
 ```sh
@@ -25,7 +25,7 @@ xattr -dr com.apple.quarantine "/Applications/Stećak.app"
 **From source (macOS, Linux):** needs [Rust](https://rustup.rs).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alminisl/ste-ak/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/alminisl/stecak/main/install.sh | sh
 # or from a checkout:
 ./install.sh
 ```
@@ -35,7 +35,7 @@ On macOS this installs `Stećak.app` plus a `stecak` command. On Linux it instal
 **Anywhere with Cargo (incl. Windows):**
 
 ```sh
-cargo install --git https://github.com/alminisl/ste-ak
+cargo install --git https://github.com/alminisl/stecak
 ```
 
 Run `stecak` for your login shell, or `stecak -e htop` to run a command instead.

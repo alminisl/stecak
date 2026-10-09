@@ -1,7 +1,7 @@
 #!/bin/sh
 # Stećak installer: builds from source and installs for the current user.
 #
-#   curl -fsSL https://raw.githubusercontent.com/alminisl/ste-ak/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/alminisl/stecak/main/install.sh | sh
 #   or, from a checkout:  ./install.sh
 #
 # macOS: installs Stećak.app into /Applications (or ~/Applications) and a `stecak` command.
@@ -9,7 +9,7 @@
 # Requires a Rust toolchain (https://rustup.rs).
 set -eu
 
-REPO="https://github.com/alminisl/ste-ak.git"
+REPO="https://github.com/alminisl/stecak.git"
 say() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -20,7 +20,7 @@ if [ -f Cargo.toml ] && grep -q '^name = "stecak"' Cargo.toml; then
     SRC=$(pwd)
 else
     command -v git >/dev/null 2>&1 || die "git is required."
-    SRC=$(mktemp -d)/ste-ak
+    SRC=$(mktemp -d)/stecak
     say "Cloning $REPO"
     git clone --depth 1 "$REPO" "$SRC"
 fi
