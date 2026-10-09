@@ -409,6 +409,10 @@ impl Renderer {
         );
     }
 
+    pub fn monospace_families(&self) -> &[String] {
+        &self.text.monospace_families
+    }
+
     pub fn has_bosancica(&self) -> bool {
         self.text.has_bosancica
     }

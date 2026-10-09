@@ -43,6 +43,12 @@ pub enum UserEvent {
     UpdateInstalled(Result<std::path::PathBuf, String>),
     /// One step of a scripted UI session (STECAK_DEMO), used for automated visual tests.
     Demo(String),
+    /// "Ask AI" finished: (pane, request generation, command or error).
+    AiReply(PaneId, u64, Result<String, String>),
+    /// An agent started in a new split has settled: deliver the text waiting for it.
+    AgentReady(PaneId),
+    /// Press Enter in a pane (after pasting a prompt into an agent).
+    Submit(PaneId),
 }
 
 pub struct GridSize {
@@ -110,6 +116,8 @@ pub struct Pane {
     /// Milliseconds since the Unix epoch when output last arrived (agent "working" detection).
     pub last_output: Arc<AtomicU64>,
     pub title: Arc<Mutex<String>>,
+    /// The last command that finished, when the shell reports commands (shell integration).
+    pub last_command: Arc<Mutex<Option<crate::ai::CommandRecord>>>,
     writer: Writer,
     master: Box<dyn MasterPty + Send>,
     window_size: Arc<Mutex<WindowSize>>,
@@ -140,6 +148,14 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
+        let default_shell = std::env::var("SHELL").unwrap_or_default();
+        let integration_shell = if command.is_some() || !config.shell_integration {
+            ""
+        } else if config.shell.program.is_empty() {
+            default_shell.as_str()
+        } else {
+            config.shell.program.as_str()
+        };
         let mut cmd = if let Some(command) = command {
             // Run through the login shell so the user's PATH (npm, ~/.local/bin…) applies.
             let shell = if config.shell.program.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()) } else { config.shell.program.clone() };
@@ -157,6 +173,9 @@ impl Pane {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "stecak");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        for (k, v) in crate::ai::integration_env(integration_shell) {
+            cmd.env(k, v);
+        }
         match cwd.map(Path::to_path_buf).or_else(dirs::home_dir) {
             Some(dir) if dir.is_dir() => cmd.cwd(dir),
             _ => {}
@@ -186,11 +205,14 @@ impl Pane {
         let fresh_reader = fresh.clone();
         let last_output = Arc::new(AtomicU64::new(0));
         let last_output_reader = last_output.clone();
+        let last_command = Arc::new(Mutex::new(None));
+        let last_command_reader = last_command.clone();
         std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
             .stack_size(256 * 1024)
             .spawn(move || {
                 let mut parser: Processor = Processor::new();
+                let mut tracker = crate::ai::CommandTracker::default();
                 let mut buf = vec![0u8; 1 << 16];
                 loop {
                     match reader.read(&mut buf) {
@@ -199,6 +221,9 @@ impl Pane {
                             parser.advance(&mut *term_reader.lock(), &buf[..n]);
                             fresh_reader.store(true, Ordering::Release);
                             last_output_reader.store(now_ms(), Ordering::Release);
+                            if let Some(record) = tracker.feed(&buf[..n]) {
+                                *last_command_reader.lock() = Some(record);
+                            }
                             for msg in crate::agents::notifications(&buf[..n]) {
                                 let _ = proxy.send_event(UserEvent::Notify(id, Some(msg)));
                             }
@@ -217,7 +242,7 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { term, fresh, last_output, title, writer, master: pair.master, window_size, child, last_size })
+        Ok(Self { term, fresh, last_output, title, last_command, writer, master: pair.master, window_size, child, last_size })
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -262,6 +287,14 @@ impl Pane {
     pub fn foreground_process(&self) -> Option<String> {
         #[cfg(unix)]
         return self.master.process_group_leader().and_then(crate::agents::process_name);
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// Pid of the pane's foreground process (the agent, while one runs).
+    pub fn foreground_pid(&self) -> Option<i32> {
+        #[cfg(unix)]
+        return self.master.process_group_leader();
         #[cfg(not(unix))]
         None
     }

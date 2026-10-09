@@ -208,6 +208,16 @@ pub fn process_name(_pid: i32) -> Option<String> {
     None
 }
 
+/// The session a running Claude Code process is in: Claude Code keeps
+/// `~/.claude/sessions/<pid>.json` with its current `sessionId` (updated on /clear, /resume).
+pub fn claude_session_id(pid: i32) -> Option<String> {
+    let path = dirs::home_dir()?.join(".claude/sessions").join(format!("{pid}.json"));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let id = v["sessionId"].as_str()?;
+    // It becomes a shell argument: accept only what session ids look like.
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| id.to_string())
+}
+
 pub fn is_agent(process: &str) -> bool {
     let p = process.to_lowercase();
     p.contains("claude") || p.contains("codex")
