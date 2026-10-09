@@ -30,6 +30,10 @@ background_image:
   tint: 0.6            # theme background laid over the image
   fit: cover           # cover | contain | stretch | center
 
+agent:                 # Cmd+Shift+A opens this in a split; Cmd+Shift+S browses sessions
+  command: claude       # or codex
+  notifications: true   # macOS notification when an agent needs you
+
 bosancica:             # Cmd+Shift+B: draw text in the medieval Bosnian script
   enabled: false
   font: BoSanko2       # installed family, or a path to a .ttf/.otf (font not bundled; see README)

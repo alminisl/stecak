@@ -6,7 +6,9 @@
 //! - portable-pty: cross-platform PTY (ConPTY on Windows)
 //! - swash: font shaping (ligatures) and rasterization
 
+mod agents;
 mod bgimage;
+mod browser;
 mod config;
 mod draw;
 mod input;
@@ -19,7 +21,7 @@ mod settings;
 mod text;
 mod theme;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,10 +33,10 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, UserAttentionType, Window, WindowId};
 
 use config::{Config, ShellConfig};
 use draw::{DrawStats, Highlights, PaneCache};
@@ -102,6 +104,14 @@ struct App {
     search: Search,
     search_gen: u64,
     settings: Settings,
+    sessions: browser::Browser,
+    /// Where the browser's rows were last drawn: (panel rect, first row y, row height, first index).
+    sessions_layout: Option<(Rect, f32, f32, usize)>,
+    /// Panes that rang the bell / notified while you were looking elsewhere.
+    attention: HashSet<PaneId>,
+    last_notified: HashMap<PaneId, Instant>,
+    /// An agent is working in some tab: keep redrawing the tab animation.
+    animating: bool,
     bg_gen: Arc<AtomicU64>,
     /// Set by PTY reader threads when they've sent a wakeup that hasn't been drawn yet.
     wakeup_pending: Arc<AtomicBool>,
@@ -150,6 +160,11 @@ impl App {
             search: Search::default(),
             search_gen: 0,
             settings: Settings::default(),
+            sessions: browser::Browser::default(),
+            sessions_layout: None,
+            attention: HashSet::new(),
+            last_notified: HashMap::new(),
+            animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
             dirty: true,
@@ -201,13 +216,14 @@ impl App {
         cfg
     }
 
-    fn spawn_pane(&mut self) -> Option<PaneId> {
+    /// Spawn a pane running the shell, or `command` through the login shell. Starts in `cwd`,
+    /// else the focused pane's directory.
+    fn spawn_pane(&mut self, command: Option<&str>, cwd: Option<PathBuf>) -> Option<PaneId> {
         let id = self.next_id;
         self.next_id += 1;
-        // New tabs/splits start in the focused pane's directory.
-        let cwd = self.focused_pane().and_then(|p| p.cwd());
+        let cwd = cwd.or_else(|| self.focused_pane().and_then(|p| p.cwd()));
         let size = GridSize { cols: 80, rows: 24 }; // corrected by resize_all() right after
-        match Pane::spawn(id, &self.shell_config(), size, self.cell_px(), cwd.as_deref(), self.proxy.clone(), self.wakeup_pending.clone()) {
+        match Pane::spawn(id, &self.shell_config(), size, self.cell_px(), cwd.as_deref(), command, self.proxy.clone(), self.wakeup_pending.clone()) {
             Ok(p) => {
                 self.panes.insert(id, p);
                 Some(id)
@@ -220,16 +236,20 @@ impl App {
     }
 
     fn new_tab(&mut self) {
-        if let Some(id) = self.spawn_pane() {
+        self.open_tab(None, None);
+    }
+
+    fn open_tab(&mut self, command: Option<&str>, cwd: Option<PathBuf>) {
+        if let Some(id) = self.spawn_pane(command, cwd) {
             self.tabs.push(Tab { root: Node::Leaf(id), focus: id });
             self.active = self.tabs.len() - 1;
             self.resize_all();
         }
     }
 
-    fn split(&mut self, dir: Dir) {
+    fn split(&mut self, dir: Dir, command: Option<&str>) {
         let Some(focus) = self.tabs.get(self.active).map(|t| t.focus) else { return };
-        if let Some(id) = self.spawn_pane() {
+        if let Some(id) = self.spawn_pane(command, None) {
             let tab = &mut self.tabs[self.active];
             tab.root.split(focus, id, dir);
             tab.focus = id;
@@ -403,7 +423,15 @@ impl App {
                     self.mark_dirty();
                 }
             }
-            Action::Split(dir) => self.split(dir),
+            Action::Split(dir) => self.split(dir, None),
+            Action::AgentSplit => {
+                let cmd = self.config.agent.command.clone();
+                self.split(Dir::Horizontal, Some(&cmd));
+            }
+            Action::Sessions => {
+                self.sessions.open();
+                self.mark_dirty();
+            }
             Action::NextPane => self.cycle_pane(1),
             Action::PrevPane => self.cycle_pane(-1),
             Action::OpenSettings => {
@@ -457,6 +485,58 @@ impl App {
                 }
             }
         }
+    }
+
+    /// A pane rang the bell or sent a notification (agents do this when they finish or need
+    /// permission). Mark its tab, and if you're not looking at it, tell the OS.
+    fn on_notify(&mut self, id: PaneId, msg: Option<String>) {
+        let in_active_tab = self.tabs.get(self.active).is_some_and(|t| {
+            let mut ids = vec![];
+            t.root.leaves(&mut ids);
+            ids.contains(&id)
+        });
+        if self.focused && in_active_tab {
+            return;
+        }
+        self.attention.insert(id);
+        if let Some(w) = &self.window {
+            w.request_user_attention(Some(UserAttentionType::Informational));
+        }
+        let Some(pane) = self.panes.get(&id) else { return };
+        // Plain bells from a shell (e.g. tab completion) don't deserve a desktop notification.
+        let from_agent = msg.is_some() || pane.foreground_process().is_some_and(|p| agents::is_agent(&p));
+        let recent = self.last_notified.get(&id).is_some_and(|t| t.elapsed() < Duration::from_secs(3));
+        if self.config.agent.notifications && !self.focused && from_agent && !recent {
+            self.last_notified.insert(id, Instant::now());
+            let body = msg.unwrap_or_else(|| "Needs your attention".into());
+            desktop_notification(&pane.display_title(), &body);
+        }
+        self.mark_dirty();
+    }
+
+    /// Keys while the session browser is open. Returns true if consumed.
+    fn sessions_key(&mut self, event: &KeyEvent) -> bool {
+        use browser::Key as K;
+        let key = match &event.logical_key {
+            Key::Named(NamedKey::ArrowUp) => K::Up,
+            Key::Named(NamedKey::ArrowDown) => K::Down,
+            Key::Named(NamedKey::Enter) => K::Enter,
+            Key::Named(NamedKey::Escape) => K::Escape,
+            Key::Named(NamedKey::Backspace) => K::Backspace,
+            _ => match &event.text {
+                Some(t) if !t.chars().any(char::is_control) => K::Text(t.as_str()),
+                _ => return false,
+            },
+        };
+        if let Some(s) = self.sessions.handle(key) {
+            self.resume(s);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    fn resume(&mut self, s: agents::Session) {
+        self.open_tab(Some(&s.resume_command()), Some(s.cwd));
     }
 
     fn search_step(&mut self, dir: Direction) {
@@ -527,8 +607,8 @@ impl App {
     fn demo_step(&mut self, step: &str, event_loop: &ActiveEventLoop) {
         let (cmd, arg) = step.split_once(':').unwrap_or((step, ""));
         match cmd {
-            "split-h" => self.split(Dir::Horizontal),
-            "split-v" => self.split(Dir::Vertical),
+            "split-h" => self.split(Dir::Horizontal, None),
+            "split-v" => self.split(Dir::Vertical, None),
             "tab" => self.new_tab(),
             "pane" => self.cycle_pane(1),
             "type" => self.handle_action(Action::Write(arg.replace("\\n", "\r").into_bytes()), event_loop),
@@ -540,6 +620,15 @@ impl App {
                 self.search_gen += 1;
             }
             "settings" => self.handle_action(Action::OpenSettings, event_loop),
+            "sessions" => {
+                self.sessions.open();
+                self.sessions.query = arg.to_string();
+            }
+            "attention" => {
+                if let Some(id) = self.tabs.first().map(|t| t.focus) {
+                    self.attention.insert(id);
+                }
+            }
             "settings-key" => {
                 use settings::Key as K;
                 let key = match arg {
@@ -600,7 +689,7 @@ impl App {
                 if let Some(p) = self.panes.get(&g.id) {
                     let term = p.term.lock();
                     let line = Line(row as i32 - term.grid().display_offset() as i32);
-                    if let Some((a, b, url)) = mouse::url_at(&term, line, col) {
+                    if let Some((a, b, url)) = mouse::hyperlink_at(&term, line, col).or_else(|| mouse::url_at(&term, line, col)) {
                         hover = Some((g.id, line.0, a, b, url));
                     }
                 }
@@ -645,6 +734,20 @@ impl App {
 
     fn on_press(&mut self, button: MouseButton, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        if self.sessions.open {
+            match self.sessions_layout {
+                Some((panel, y0, lh, first)) if panel.contains(x, y) => {
+                    if y >= y0 {
+                        if let Some(s) = self.sessions.pick(first + ((y - y0) / lh) as usize) {
+                            self.resume(s);
+                        }
+                    }
+                }
+                _ => self.sessions.open = false,
+            }
+            self.mark_dirty();
+            return;
+        }
         if self.settings.open {
             self.settings.open = false;
             self.mark_dirty();
@@ -865,6 +968,32 @@ impl App {
         let multi = geoms.len() > 1;
         let image = self.config.background_image.clone();
 
+        // Tab status for agents: working (recent output from claude/codex) or waiting on you.
+        let now = pane::now_ms();
+        if self.focused {
+            if let Some(t) = self.tabs.get(self.active) {
+                let mut ids = vec![];
+                t.root.leaves(&mut ids);
+                ids.iter().for_each(|id| {
+                    self.attention.remove(id);
+                });
+            }
+        }
+        let statuses: Vec<(bool, bool)> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let mut ids = vec![];
+                t.root.leaves(&mut ids);
+                let waiting = ids.iter().any(|id| self.attention.contains(id));
+                let working = ids.iter().filter_map(|id| self.panes.get(id)).any(|p| {
+                    now.saturating_sub(p.last_output.load(Ordering::Acquire)) < 1500 && p.foreground_process().is_some_and(|n| agents::is_agent(&n))
+                });
+                (working, waiting)
+            })
+            .collect();
+        self.animating = statuses.iter().any(|s| s.0);
+
         // Frame skipping: only panes on screen matter. Output in background tabs (or nothing
         // at all) costs no CPU rendering and no GPU work.
         let fresh = geoms.iter().filter_map(|g| self.panes.get(&g.id)).fold(false, |acc, p| p.fresh.swap(false, Ordering::AcqRel) | acc);
@@ -967,12 +1096,37 @@ impl App {
                 tab.root.leaves(&mut n);
                 let title = panes.get(&tab.focus).map(|p| p.display_title()).unwrap_or_default();
                 let label = if n.len() > 1 { format!("{}  {}  [{}]", i + 1, title, n.len()) } else { format!("{}  {}", i + 1, title) };
-                r.text(&label, x + cw, text_y, x + tab_w - cw, rgba(theme.fg, if active { 1.0 } else { 0.55 }));
+                let (working, waiting) = statuses.get(i).copied().unwrap_or_default();
+                let amber = rgba(theme.palette[3], 1.0);
+                let mut lx = x + cw;
+                if waiting {
+                    // Steady dot: an agent finished or wants permission.
+                    r.text("●", lx, text_y, x + tab_w, amber);
+                    lx += 2.0 * cw;
+                } else if working {
+                    // A rosette that turns while the agent works…
+                    const ROSETTE: [&str; 4] = ["✻", "✼", "✽", "❋"];
+                    r.text(ROSETTE[(now / 160 % 4) as usize], lx, text_y, x + tab_w, amber);
+                    lx += 2.0 * cw;
+                    // …and a chisel stroke sweeping along the tab's edge, like carving stone.
+                    let t = (now % 1600) as f32 / 1600.0;
+                    let seg = tab_w * 0.3;
+                    let sx = x - seg + (tab_w + seg) * t;
+                    let (a, b) = (sx.max(x), (sx + seg).min(x + tab_w));
+                    if b > a {
+                        r.rect(a, tab_bar_h - 2.0 * r.scale, b - a, 2.0 * r.scale, amber);
+                    }
+                }
+                r.text(&label, lx, text_y, x + tab_w - cw, rgba(theme.fg, if active { 1.0 } else { 0.55 }));
             }
             let plus_x = tab_w * tabs.len() as f32;
             r.text("+", plus_x + (plus_w - cw) / 2.0, text_y, plus_x + plus_w, rgba(theme.fg, 0.7));
         }
 
+        self.sessions_layout = None;
+        if self.sessions.open {
+            self.sessions_layout = Some(draw_sessions(r, theme, &self.sessions));
+        }
         if self.settings.open {
             self.settings.bosancica_font_ok = r.has_bosancica();
             draw_settings(r, theme, &self.settings, config);
@@ -1051,6 +1205,75 @@ fn draw_search_bar(r: &mut Renderer, theme: &Theme, search: &Search, g: &PaneGeo
     r.text(status, end + 2.0 * cw, ty, g.rect.x + g.rect.w - cw, rgba(color, 0.6));
 }
 
+/// The session browser panel. Returns (panel rect, first row y, row height, first index)
+/// so clicks can be mapped back to rows.
+fn draw_sessions(r: &mut Renderer, theme: &Theme, b: &browser::Browser) -> (Rect, f32, f32, usize) {
+    let (cw, ch) = r.cell();
+    let (win_w, win_h) = r.size();
+    let lh = (ch * 1.45).round();
+    let w = (cw * 110.0).min(win_w - 4.0 * cw);
+    let h = (win_h * 0.8).min(lh * 22.0);
+    let (x, y) = (((win_w - w) / 2.0).round(), ((win_h - h) / 2.0).round());
+    r.rect(0.0, 0.0, win_w, win_h, [0.0, 0.0, 0.0, 0.45]);
+    r.rect(x, y, w, h, rgba(theme.tab_bar, 0.98));
+    r.rect(x, y, w, r.scale.max(1.0), rgba(theme.palette[3], 1.0));
+    let pad = 2.0 * cw;
+    let dy = ((lh - ch) / 2.0).round();
+    let items = b.visible();
+    r.text("Sessions", x + pad, y + dy + lh * 0.2, x + w - pad, rgba(theme.fg, 1.0));
+    let count = format!("{} · ⏎ resume · esc", items.len());
+    let cx = x + w - pad - count.chars().count() as f32 * cw;
+    r.text(&count, cx, y + dy + lh * 0.2, x + w - pad, rgba(theme.fg, 0.5));
+    let search = format!("Search: {}▏", b.query);
+    r.text(&search, x + pad, y + dy + lh * 1.3, x + w - pad, rgba(theme.fg, 0.9));
+
+    let y0 = y + lh * 2.6;
+    let rows = (((y + h - lh * 0.4) - y0) / lh).floor().max(1.0) as usize;
+    let first = b.selected.saturating_sub(rows - 1);
+    let right_cols = 44.0;
+    if items.is_empty() {
+        r.text("No Claude Code or Codex sessions found", x + pad, y0 + dy, x + w - pad, rgba(theme.fg, 0.5));
+    }
+    for (i, s) in items.iter().enumerate().skip(first).take(rows) {
+        let ry = y0 + (i - first) as f32 * lh;
+        let selected = i == b.selected;
+        if selected {
+            r.rect(x + cw, ry, w - 2.0 * cw, lh, rgba(theme.tab_active, 1.0));
+        }
+        let a = if selected { 1.0 } else { 0.75 };
+        if s.is_live() {
+            r.text("●", x + pad, ry + dy, x + w, rgba(theme.palette[3], 1.0));
+        }
+        let tool = format!("{:<7}", s.tool.name());
+        r.text(&tool, x + pad + 2.0 * cw, ry + dy, x + w, rgba(theme.palette[4], a));
+        let right = format!("{} · {}{}", browser::tilde(&s.cwd), if s.branch.is_empty() { String::new() } else { format!("{} · ", s.branch) }, browser::ago(s.modified));
+        let right: String = right.chars().rev().take(right_cols as usize).collect::<Vec<_>>().into_iter().rev().collect();
+        let rx = x + w - pad - right.chars().count() as f32 * cw;
+        r.text(&s.title, x + pad + 10.0 * cw, ry + dy, rx - 2.0 * cw, rgba(theme.fg, a));
+        r.text(&right, rx, ry + dy, x + w - pad, rgba(theme.fg, 0.5));
+    }
+    (Rect { x, y, w, h }, y0, lh, first)
+}
+
+/// Native notification. shortcut: shells out to osascript/notify-send instead of linking a
+/// notification framework; the macOS notification is attributed to Script Editor.
+fn desktop_notification(title: &str, body: &str) {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!("display notification \"{}\" with title \"Stećak — {}\"", esc(body), esc(title)))
+            .spawn()
+    } else if cfg!(target_os = "linux") {
+        std::process::Command::new("notify-send").arg(format!("Stećak — {title}")).arg(body).spawn()
+    } else {
+        return;
+    };
+    if let Err(e) = result {
+        log::warn!("notification failed: {e}");
+    }
+}
+
 fn draw_settings(r: &mut Renderer, theme: &Theme, settings: &Settings, cfg: &Config) {
     let (cw, ch) = r.cell();
     let (win_w, win_h) = r.size();
@@ -1082,6 +1305,21 @@ fn draw_settings(r: &mut Renderer, theme: &Theme, settings: &Settings, cfg: &Con
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            self.mark_dirty();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // ~15 fps tab animation only while an agent works; otherwise sleep until an event.
+        event_loop.set_control_flow(if self.animating && !self.occluded {
+            ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(66))
+        } else {
+            ControlFlow::Wait
+        });
+    }
+
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.flush_stats();
     }
@@ -1093,7 +1331,16 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("Stećak")
             .with_transparent(true)
+            // Hidden until sized and centered (see below), so it never flashes at the wrong spot.
+            .with_visible(false)
             .with_inner_size(winit::dpi::LogicalSize::new(900.0, 560.0));
+        // Scripted test runs: float above other windows so macOS keeps drawing us, but never
+        // take keyboard focus away from what the user is typing into.
+        let attrs = if std::env::var_os("STECAK_DEMO").is_some() {
+            attrs.with_window_level(winit::window::WindowLevel::AlwaysOnTop).with_active(false)
+        } else {
+            attrs
+        };
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         window.set_cursor(CursorIcon::Text);
         window.set_ime_allowed(true);
@@ -1115,9 +1362,24 @@ impl ApplicationHandler<UserEvent> for App {
         let tab_bar = if self.config.tabs.always_show { (ch * 1.7).round() } else { 0.0 };
         let w = self.config.window.columns as f32 * cw + 2.0 * pad;
         let h = self.config.window.rows as f32 * ch + 2.0 * pad + tab_bar;
+        let monitor = window.current_monitor();
+        // Never larger than the screen, or the titlebar ends up off-screen.
+        let (w, h) = match &monitor {
+            Some(m) => (w.min(m.size().width as f32 * 0.9), h.min(m.size().height as f32 * 0.85)),
+            None => (w, h),
+        };
         if let Some(size) = window.request_inner_size(PhysicalSize::new(w as u32, h as u32)) {
             self.renderer.as_mut().unwrap().resize(size.width, size.height);
         }
+        // macOS grows windows upward from their bottom-left corner, which pushed the titlebar
+        // under the menu bar on short screens. Center on the window's own monitor instead.
+        if let Some(m) = monitor {
+            let (mp, ms, os) = (m.position(), m.size(), window.outer_size());
+            let x = mp.x + (ms.width as i32 - os.width as i32).max(0) / 2;
+            let y = mp.y + (ms.height as i32 - os.height as i32).max(0) / 2;
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
+        window.set_visible(true);
 
         self.new_tab();
         self.load_background();
@@ -1151,6 +1413,7 @@ impl ApplicationHandler<UserEvent> for App {
                 Ok(_) => {}
                 Err(e) => log::error!("config error (keeping previous config): {e}"),
             },
+            UserEvent::Notify(id, msg) => self.on_notify(id, msg),
             UserEvent::Demo(step) => self.demo_step(&step, event_loop),
             UserEvent::BackgroundImage(img) => {
                 self.renderer.as_mut().unwrap().set_background_image(img);
@@ -1196,6 +1459,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { .. } if !self.preedit.is_empty() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let app_mod = input::is_app_modifier(self.modifiers);
+                if self.sessions.open && !app_mod && self.sessions_key(&event) {
+                    return;
+                }
                 if self.settings.open && !app_mod && self.settings_key(&event) {
                     return;
                 }
@@ -1246,7 +1512,8 @@ impl ApplicationHandler<UserEvent> for App {
             // Hidden/minimized windows don't render at all; the terminal state still updates.
             WindowEvent::Occluded(o) => {
                 log::debug!("occluded: {o}");
-                self.occluded = o;
+                // Scripted test runs sit behind other windows on purpose but still need frames.
+                self.occluded = o && std::env::var_os("STECAK_DEMO").is_none();
                 self.mark_dirty();
             }
             WindowEvent::RedrawRequested if !self.occluded => self.draw(),
@@ -1324,7 +1591,14 @@ fn main() {
     });
     log::info!("config path: {}", config_path.display());
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    // Scripted test runs must not steal keyboard focus from whatever the user is doing.
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("STECAK_DEMO").is_some() {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_activate_ignoring_other_apps(false);
+    }
+    let event_loop = builder.build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     watch_config(config_path.clone(), proxy.clone());

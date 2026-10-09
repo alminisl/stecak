@@ -16,6 +16,7 @@ pub struct Config {
     pub colors: ColorConfig,
     pub shell: ShellConfig,
     pub tabs: TabsConfig,
+    pub agent: AgentConfig,
     pub background_image: BackgroundImageConfig,
     pub bosancica: BosancicaConfig,
     pub scrollback: usize,
@@ -130,6 +131,21 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+/// AI coding agent launched by Cmd+Shift+A in a split (e.g. "claude" or "codex").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentConfig {
+    pub command: String,
+    /// macOS notification when an agent rings the bell or notifies while you're elsewhere.
+    pub notifications: bool,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self { command: "claude".into(), notifications: true }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TabsConfig {
@@ -145,6 +161,7 @@ impl Default for Config {
             colors: ColorConfig::default(),
             shell: ShellConfig::default(),
             tabs: TabsConfig::default(),
+            agent: AgentConfig::default(),
             background_image: BackgroundImageConfig::default(),
             bosancica: BosancicaConfig::default(),
             scrollback: 2_000,
@@ -175,6 +192,7 @@ impl Default for FontConfig {
             fallback: [
                 "Symbols Nerd Font Mono",
                 "Apple Symbols",
+                "Zapf Dingbats",
                 "Segoe UI Symbol",
                 "Noto Sans Symbols 2",
                 "DejaVu Sans",

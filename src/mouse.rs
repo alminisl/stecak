@@ -88,6 +88,22 @@ pub fn url_at(term: &Term<Listener>, line: Line, col: usize) -> Option<(usize, u
     None
 }
 
+/// OSC 8 hyperlink under the cell (agents print clickable file and web links this way):
+/// (start col, end col inclusive, uri), spanning the adjacent cells with the same link.
+pub fn hyperlink_at(term: &Term<Listener>, line: Line, col: usize) -> Option<(usize, usize, String)> {
+    let row = &term.grid()[line];
+    let link = row[Column(col)].hyperlink()?;
+    let same = |c: usize| row[Column(c)].hyperlink().is_some_and(|h| h.id() == link.id() && h.uri() == link.uri());
+    let (mut a, mut b) = (col, col);
+    while a > 0 && same(a - 1) {
+        a -= 1;
+    }
+    while b + 1 < term.columns() && same(b + 1) {
+        b += 1;
+    }
+    Some((a, b, link.uri().to_string()))
+}
+
 pub fn open_url(url: &str) {
     let result = if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).spawn()

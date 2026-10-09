@@ -23,6 +23,8 @@ pub enum Action {
     FindPrev,
     ClearScrollback,
     ToggleBosancica,
+    AgentSplit,
+    Sessions,
     FontBigger,
     FontSmaller,
     FontReset,
@@ -67,6 +69,8 @@ fn shortcut(event: &KeyEvent, m: ModifiersState) -> Option<Action> {
         "g" => Action::FindNext,
         "k" => Action::ClearScrollback,
         "b" if shift || !mac => Action::ToggleBosancica,
+        "a" if shift || !mac => Action::AgentSplit,
+        "s" if shift || !mac => Action::Sessions,
         // iTerm2 conventions: Cmd+Shift+]/[ = tabs, Cmd+]/[ = panes.
         "]" | "}" if shift => Action::NextTab,
         "[" | "{" if shift => Action::PrevTab,
@@ -111,6 +115,9 @@ fn encode(event: &KeyEvent, m: ModifiersState, app_cursor: bool, option_as_alt: 
 
     if let Key::Named(named) = &event.logical_key {
         let out = match named {
+            // Shift+Enter = newline in agent prompts (Claude Code reads ESC CR as "insert newline",
+            // the same thing iTerm2's /terminal-setup configures).
+            NamedKey::Enter if m.shift_key() => b"\x1b\r".to_vec(),
             NamedKey::Enter => b"\r".to_vec(),
             NamedKey::Backspace => if m.control_key() { b"\x08".to_vec() } else if m.alt_key() { b"\x1b\x7f".to_vec() } else { b"\x7f".to_vec() },
             NamedKey::Tab => if m.shift_key() { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
