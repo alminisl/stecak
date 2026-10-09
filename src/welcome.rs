@@ -30,7 +30,11 @@ const RESET: &str = "\x1b[0m";
 /// The banner as terminal output (CRLF line ends), fitted to `cols`.
 pub fn banner(cols: usize, seed: u64) -> String {
     let (original, english) = INSCRIPTIONS[(seed % INSCRIPTIONS.len() as u64) as usize];
-    let keys = if cfg!(target_os = "macos") { "⌘/ shortcuts · ⌘, settings · ⌘⇧S sessions" } else { "Ctrl+Shift+/ shortcuts · Ctrl+Shift+, settings" };
+    let (legend, keys) = if cfg!(target_os = "macos") {
+        ("Press ⌘/ to see all keyboard shortcuts", "⌘, settings · ⌘⇧S sessions")
+    } else {
+        ("Press Ctrl+Shift+/ to see all keyboard shortcuts", "Ctrl+Shift+, settings · Ctrl+Shift+S sessions")
+    };
     let text = [
         format!("{BOLD}Stećak {}{RESET}", env!("CARGO_PKG_VERSION")),
         format!("{DIM}a terminal carved to last{RESET}"),
@@ -38,6 +42,7 @@ pub fn banner(cols: usize, seed: u64) -> String {
         format!("{ITALIC}“{original}”{RESET}"),
         format!("{DIM}{english}{RESET}"),
         String::new(),
+        format!("{AMBER}{legend}{RESET}"),
         format!("{DIM}{keys}{RESET}"),
     ];
     let mut out = String::from("\r\n");
