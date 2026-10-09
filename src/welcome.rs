@@ -5,7 +5,6 @@
 const INSCRIPTIONS: &[(&str, &str)] = &[
     ("Ase leži …", "Here lies … (how countless stećak epitaphs begin)"),
     ("Ja sam bil kako vi jeste, a vi ćete biti kako i jesam.", "I was as you are, and you will be as I am."),
-    ("Va ime Oca i Sina i Svetoga Duha.", "In the name of the Father, the Son and the Holy Spirit."),
 ];
 
 const ART: &[&str] = &[
@@ -73,8 +72,9 @@ mod tests {
         assert!(wide.contains("Ja sam bil kako vi jeste"));
         assert!(banner(100, 0).contains("Ase leži"));
         // Narrow windows stack the text under the drawing instead of beside it.
-        assert!(banner(60, 2).lines().count() > ART.len() + 5);
-        assert!(banner(100, 2).lines().count() < ART.len() + 4);
+        assert!(banner(60, 1).lines().count() > ART.len() + 5);
+        assert!(banner(100, 1).lines().count() < ART.len() + 4);
+        assert!((0..10).all(|seed| !banner(100, seed).contains("Va ime")));
         // Every art row is the same width so the text column lines up.
         assert!(ART.iter().all(|l| l.chars().count() == ART[0].chars().count()));
     }
