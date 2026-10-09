@@ -20,6 +20,7 @@ pub enum Item {
     ImageFit,
     Scrollback,
     OptionAsAlt,
+    Shortcuts,
     OpenFile,
 }
 
@@ -38,6 +39,7 @@ pub const ITEMS: &[Item] = &[
     Item::ImageFit,
     Item::Scrollback,
     Item::OptionAsAlt,
+    Item::Shortcuts,
     Item::OpenFile,
 ];
 
@@ -57,6 +59,7 @@ pub enum Outcome {
     None,
     Changed(Config),
     OpenFile,
+    Shortcuts,
 }
 
 fn on_off(b: bool) -> String {
@@ -80,6 +83,7 @@ impl Item {
             Item::ImageFit => "  Image fit",
             Item::Scrollback => "Scrollback lines",
             Item::OptionAsAlt => "Option key as Alt",
+            Item::Shortcuts => "Keyboard shortcuts…",
             Item::OpenFile => "Open config file…",
         }
     }
@@ -102,7 +106,8 @@ impl Item {
             Item::ImageFit => c.background_image.fit.clone(),
             Item::Scrollback => format!("{}", c.scrollback),
             Item::OptionAsAlt => on_off(c.option_as_alt),
-            Item::OpenFile => String::new(),
+            Item::Shortcuts => if cfg!(target_os = "macos") { "⌘/".into() } else { "Ctrl+Shift+/".into() },
+            Item::OpenFile => crate::config::find_config_path().map_or("creates ~/.config/stecak/config.yaml".into(), |p| crate::browser::tilde(&p)),
         }
     }
 
@@ -131,7 +136,7 @@ impl Item {
             }
             Item::Scrollback => c.scrollback = (c.scrollback as i64 + 1000 * dir as i64).clamp(0, 100_000) as usize,
             Item::OptionAsAlt => c.option_as_alt = !c.option_as_alt,
-            Item::OpenFile => return false,
+            Item::OpenFile | Item::Shortcuts => return false,
         }
         true
     }
@@ -187,6 +192,7 @@ impl Settings {
             Key::Right => item.adjust(&mut c, 1),
             Key::Enter => match item {
                 Item::OpenFile => return Outcome::OpenFile,
+                Item::Shortcuts => return Outcome::Shortcuts,
                 Item::ImagePath => {
                     self.editing = Some(cfg.background_image.path.clone());
                     false
@@ -237,5 +243,48 @@ mod tests {
             Outcome::Changed(c) => assert_eq!(c.font.size, cfg.font.size + 1.0),
             _ => panic!("font size should change"),
         }
+    }
+}
+
+/// Keyboard shortcut legend: (keys, action).
+pub fn shortcuts() -> &'static [(&'static str, &'static str)] {
+    if cfg!(target_os = "macos") {
+        &[
+            ("⌘T / ⌘W", "New tab / close pane"),
+            ("⌘D / ⌘⇧D", "Split right / split down"),
+            ("⌘] / ⌘[", "Next / previous pane"),
+            ("⌘⇧] / ⌘⇧[  ⌘1…9", "Next / previous tab, go to tab"),
+            ("⌘F  ⌘G / ⌘⇧G", "Find, next / previous match"),
+            ("⌘C / ⌘V", "Copy / paste"),
+            ("⌘K", "Clear scrollback"),
+            ("⌘= / ⌘- / ⌘0", "Font bigger / smaller / reset"),
+            ("⌘⇧A", "Open agent (claude) in a split"),
+            ("⌘⇧S", "Session browser: resume Claude / Codex"),
+            ("⇧⏎", "Newline in agent prompts"),
+            ("⌘-click", "Open link"),
+            ("double / triple click", "Select word / line"),
+            ("⌘⇧B", "Bosančica mode"),
+            ("⌘,", "Settings (and the config file)"),
+            ("⌘/", "This list"),
+        ]
+    } else {
+        &[
+            ("Ctrl+Shift+T / W", "New tab / close pane"),
+            ("Ctrl+Shift+D / E", "Split right / split down"),
+            ("Ctrl+Shift+] / [", "Next / previous pane"),
+            ("Ctrl+Tab  Ctrl+Shift+1…9", "Next tab, go to tab"),
+            ("Ctrl+Shift+F  G", "Find, next match"),
+            ("Ctrl+Shift+C / V", "Copy / paste"),
+            ("Ctrl+Shift+K", "Clear scrollback"),
+            ("Ctrl+Shift+= / - / 0", "Font bigger / smaller / reset"),
+            ("Ctrl+Shift+A", "Open agent (claude) in a split"),
+            ("Ctrl+Shift+S", "Session browser: resume Claude / Codex"),
+            ("Shift+Enter", "Newline in agent prompts"),
+            ("Ctrl+click", "Open link"),
+            ("double / triple click", "Select word / line"),
+            ("Ctrl+Shift+B", "Bosančica mode"),
+            ("Ctrl+Shift+,", "Settings (and the config file)"),
+            ("Ctrl+Shift+/", "This list"),
+        ]
     }
 }

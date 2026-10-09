@@ -122,7 +122,8 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | = / - / 0 | font size bigger / smaller / reset |
 | Shift+A / Shift+S | agent split / session browser |
 | Shift+B | Bosančica mode on/off |
-| , | settings page |
+| , | settings page (⚙ in the tab bar too) |
+| / | keyboard shortcut legend |
 
 Mouse:
 - Drag to select; double-click selects a word, triple-click a line, Shift+click extends.

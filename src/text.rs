@@ -89,6 +89,9 @@ pub struct Text {
     bosancica_scale: f32,
     bosancica_embolden: f32,
     fallbacks: Vec<FontSource>,
+    /// Every installed face, searched last (like the OS's own font cascade) for characters no
+    /// configured font has. Only paths are kept; a face is opened only when it matches.
+    system_fonts: Vec<FontSource>,
     /// Characters missing from the primary font → face that has them.
     fallback_for: HashMap<char, u16>,
     pub px: f32,
@@ -173,6 +176,7 @@ impl Text {
             .collect();
         let bosancica = bosancica_source(&db, &cfg.bosancica.font).and_then(|s| Face::open(&s));
         let has_bosancica = bosancica.is_some();
+        let system_fonts: Vec<FontSource> = db.faces().filter_map(|f| source_of(&db, f.id)).collect();
         drop(db);
 
         let px = (cfg.font.size * scale).round();
@@ -204,6 +208,7 @@ impl Text {
             bosancica_scale,
             bosancica_embolden,
             fallbacks,
+            system_fonts,
             fallback_for: HashMap::new(),
             px,
             cell_w,
@@ -244,6 +249,15 @@ impl Text {
             if slot.as_ref().is_some_and(|f| f.font().charmap().map(c) != 0) {
                 found = (FIRST_FALLBACK + i) as u16;
                 break;
+            }
+        }
+        if found == style as u16 {
+            // Last resort: any installed font with the glyph (e.g. ⏵ that Claude Code prints).
+            // Runs once per missing character; the answer, found or not, is cached below.
+            if let Some(face) = self.system_fonts.iter().find_map(|src| Face::open(src).filter(|f| f.font().charmap().map(c) != 0)) {
+                log::info!("system fallback for {c:?}");
+                self.faces.push(Some(face));
+                found = (self.faces.len() - 1) as u16;
             }
         }
         self.fallback_for.insert(c, found);
