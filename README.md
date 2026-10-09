@@ -38,6 +38,8 @@ On macOS this installs `Stećak.app` plus a `stecak` command. On Linux it instal
 cargo install --git https://github.com/alminisl/stecak
 ```
 
+Stećak checks GitHub for a newer release when it starts and offers a download. It doesn't install anything by itself. Turn it off with `check_for_updates: false`.
+
 Run `stecak` for your login shell, or `stecak -e htop` to run a command instead.
 
 ## Why Rust (and not C++)
