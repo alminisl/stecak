@@ -114,6 +114,8 @@ struct App {
     /// A newer release to offer: (version, release page URL), and where its buttons were drawn.
     update: Option<(String, String)>,
     update_buttons: Option<(Rect, Rect)>,
+    /// Keyboard shortcut legend (⌘/) is showing.
+    help_open: bool,
     /// An agent is working in some tab: keep redrawing the tab animation.
     animating: bool,
     bg_gen: Arc<AtomicU64>,
@@ -170,6 +172,7 @@ impl App {
             last_notified: HashMap::new(),
             update: None,
             update_buttons: None,
+            help_open: false,
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
@@ -182,9 +185,17 @@ impl App {
         self.renderer.as_ref().unwrap()
     }
 
+    /// Height of the macOS titlebar we paint ourselves (the window is transparent, so the
+    /// native titlebar would show whatever is behind it). None in fullscreen or elsewhere.
+    fn titlebar_h(&self) -> f32 {
+        let fullscreen = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
+        if cfg!(target_os = "macos") && !fullscreen { (28.0 * self.r().scale).round() } else { 0.0 }
+    }
+
+    /// Everything above the panes: our titlebar band plus the tab strip.
     fn tab_bar_h(&self) -> f32 {
         let show = self.config.tabs.always_show || self.tabs.len() > 1;
-        if show { (self.r().cell().1 * 1.7).round() } else { 0.0 }
+        self.titlebar_h() + if show { (self.r().cell().1 * 1.7).round() } else { 0.0 }
     }
 
     /// Geometry of every pane in tab `tab`.
@@ -440,6 +451,11 @@ impl App {
             }
             Action::NextPane => self.cycle_pane(1),
             Action::PrevPane => self.cycle_pane(-1),
+            Action::Shortcuts => {
+                self.help_open = !self.help_open;
+                self.settings.open = false;
+                self.mark_dirty();
+            }
             Action::OpenSettings => {
                 self.settings.toggle();
                 self.mark_dirty();
@@ -604,6 +620,10 @@ impl App {
         match self.settings.handle(key, &self.config) {
             settings::Outcome::Changed(cfg) => self.apply_and_save(cfg),
             settings::Outcome::OpenFile => self.open_config_file(),
+            settings::Outcome::Shortcuts => {
+                self.settings.open = false;
+                self.help_open = true;
+            }
             settings::Outcome::None => {}
         }
         self.mark_dirty();
@@ -630,6 +650,7 @@ impl App {
                 self.sessions.open();
                 self.sessions.query = arg.to_string();
             }
+            "help" => self.help_open = true,
             "update" => self.update = Some((arg.to_string(), String::new())),
             "attention" => {
                 if let Some(id) = self.tabs.first().map(|t| t.focus) {
@@ -741,6 +762,11 @@ impl App {
 
     fn on_press(&mut self, button: MouseButton, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        if self.help_open {
+            self.help_open = false;
+            self.mark_dirty();
+            return;
+        }
         if let (Some((_, url)), Some((download, later))) = (self.update.clone(), self.update_buttons) {
             if download.contains(x, y) {
                 mouse::open_url(&url);
@@ -771,7 +797,7 @@ impl App {
             return;
         }
         if y < self.tab_bar_h() {
-            if button == MouseButton::Left {
+            if button == MouseButton::Left && y >= self.titlebar_h() {
                 self.on_tab_bar_click(x, event_loop);
             }
             return;
@@ -912,7 +938,13 @@ impl App {
 
     fn on_tab_bar_click(&mut self, x: f32, event_loop: &ActiveEventLoop) {
         let (win_w, _) = self.r().size();
-        let plus_w = self.tab_bar_h();
+        let plus_w = self.tab_bar_h() - self.titlebar_h();
+        if x >= win_w - plus_w {
+            // ⚙ at the far right: settings (where the config file and shortcuts are).
+            self.settings.toggle();
+            self.mark_dirty();
+            return;
+        }
         let tab_w = ((win_w - plus_w) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
         let idx = (x / tab_w) as usize;
         if idx < self.tabs.len() {
@@ -981,6 +1013,7 @@ impl App {
         self.wakeup_pending.store(false, Ordering::Release);
         let (geoms, dividers) = self.geometry(self.active);
         let tab_bar_h = self.tab_bar_h();
+        let title_h = self.titlebar_h();
         let focus = self.focused_id();
         let multi = geoms.len() > 1;
         let image = self.config.background_image.clone();
@@ -1097,18 +1130,20 @@ impl App {
 
         // Tab bar.
         if tab_bar_h > 0.0 {
-            r.rect(0.0, 0.0, win_w, tab_bar_h, rgba(theme.tab_bar, opacity.max(0.6)));
-            let plus_w = tab_bar_h;
+            // Titlebar band + tab strip: opaque enough that the native titlebar stays readable.
+            r.rect(0.0, 0.0, win_w, tab_bar_h, rgba(theme.tab_bar, opacity.max(0.92)));
+            let strip_h = tab_bar_h - title_h;
+            let plus_w = strip_h;
             let tab_w = ((win_w - plus_w) / tabs.len().max(1) as f32).min(260.0 * r.scale);
-            let text_y = ((tab_bar_h - ch) / 2.0).round();
+            let text_y = (title_h + (strip_h - ch) / 2.0).round();
             for (i, tab) in tabs.iter().enumerate() {
                 let x = i as f32 * tab_w;
                 let active = i == self.active;
                 if active {
-                    r.rect(x, 0.0, tab_w, tab_bar_h, rgba(theme.tab_active, 1.0));
+                    r.rect(x, title_h, tab_w, strip_h, rgba(theme.tab_active, 1.0));
                     r.rect(x, tab_bar_h - 2.0 * r.scale, tab_w, 2.0 * r.scale, rgba(theme.palette[4], 1.0));
                 }
-                r.rect(x + tab_w - r.scale, tab_bar_h * 0.25, r.scale, tab_bar_h * 0.5, rgba(theme.fg, 0.15));
+                r.rect(x + tab_w - r.scale, title_h + strip_h * 0.25, r.scale, strip_h * 0.5, rgba(theme.fg, 0.15));
                 let mut n = vec![];
                 tab.root.leaves(&mut n);
                 let title = panes.get(&tab.focus).map(|p| p.display_title()).unwrap_or_default();
@@ -1138,12 +1173,17 @@ impl App {
             }
             let plus_x = tab_w * tabs.len() as f32;
             r.text("+", plus_x + (plus_w - cw) / 2.0, text_y, plus_x + plus_w, rgba(theme.fg, 0.7));
+            let gear_x = win_w - plus_w;
+            r.text("⚙", gear_x + (plus_w - cw) / 2.0, text_y, win_w, rgba(theme.fg, 0.6));
         }
 
         self.update_buttons = self.update.as_ref().map(|(v, _)| draw_update(r, theme, v));
         self.sessions_layout = None;
         if self.sessions.open {
             self.sessions_layout = Some(draw_sessions(r, theme, &self.sessions));
+        }
+        if self.help_open {
+            draw_shortcuts(r, theme);
         }
         if self.settings.open {
             self.settings.bosancica_font_ok = r.has_bosancica();
@@ -1221,6 +1261,31 @@ fn draw_search_bar(r: &mut Renderer, theme: &Theme, search: &Search, g: &PaneGeo
     r.text(&text, g.rect.x + cw, ty, g.rect.x + g.rect.w - cw, rgba(theme.fg, 1.0));
     let color = if search.no_match { theme.palette[1] } else { theme.fg };
     r.text(status, end + 2.0 * cw, ty, g.rect.x + g.rect.w - cw, rgba(color, 0.6));
+}
+
+/// Keyboard shortcut legend (⌘/).
+fn draw_shortcuts(r: &mut Renderer, theme: &Theme) {
+    let (cw, ch) = r.cell();
+    let (win_w, win_h) = r.size();
+    let items = settings::shortcuts();
+    let lh = (ch * 1.35).round();
+    let w = (cw * 70.0).min(win_w - 4.0 * cw);
+    let h = lh * (items.len() as f32 + 4.2);
+    let (x, y) = (((win_w - w) / 2.0).round(), ((win_h - h) / 2.0).round().max(0.0));
+    r.rect(0.0, 0.0, win_w, win_h, [0.0, 0.0, 0.0, 0.45]);
+    r.rect(x, y, w, h, rgba(theme.tab_bar, 0.98));
+    r.rect(x, y, w, r.scale.max(1.0), rgba(theme.palette[3], 1.0));
+    let pad = 2.0 * cw;
+    let dy = ((lh - ch) / 2.0).round();
+    r.text("Keyboard shortcuts", x + pad, y + dy + lh * 0.3, x + w - pad, rgba(theme.fg, 1.0));
+    let keys_w = 26.0 * cw;
+    for (i, (keys, what)) in items.iter().enumerate() {
+        let ry = y + lh * (i as f32 + 1.6);
+        r.text(keys, x + pad, ry + dy, x + pad + keys_w, rgba(theme.palette[3], 1.0));
+        r.text(what, x + pad + keys_w, ry + dy, x + w - pad, rgba(theme.fg, 0.85));
+    }
+    let config = config::find_config_path().map_or("~/.config/stecak/config.yaml (created on first save)".into(), |p| browser::tilde(&p));
+    r.text(&format!("Config: {config} · reloads on save"), x + pad, y + h - lh * 1.3 + dy, x + w - pad, rgba(theme.fg, 0.5));
 }
 
 /// "A new version is available" card at the top of the window. Returns the button rects.
@@ -1378,6 +1443,12 @@ impl ApplicationHandler<UserEvent> for App {
             // Hidden until sized and centered (see below), so it never flashes at the wrong spot.
             .with_visible(false)
             .with_inner_size(winit::dpi::LogicalSize::new(900.0, 560.0));
+        // macOS: draw under a transparent titlebar so we paint it ourselves (see titlebar_h).
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs.with_titlebar_transparent(true).with_fullsize_content_view(true)
+        };
         // Scripted test runs: float above other windows so macOS keeps drawing us, but never
         // take keyboard focus away from what the user is typing into.
         let attrs = if std::env::var_os("STECAK_DEMO").is_some() {
@@ -1403,7 +1474,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Size the window to the configured grid.
         let (cw, ch) = self.r().cell();
         let pad = self.config.window.padding * window.scale_factor() as f32;
-        let tab_bar = if self.config.tabs.always_show { (ch * 1.7).round() } else { 0.0 };
+        let tab_bar = self.tab_bar_h();
         let w = self.config.window.columns as f32 * cw + 2.0 * pad;
         let h = self.config.window.rows as f32 * ch + 2.0 * pad + tab_bar;
         let monitor = window.current_monitor();
@@ -1510,6 +1581,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { .. } if !self.preedit.is_empty() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let app_mod = input::is_app_modifier(self.modifiers);
+                if self.help_open && !app_mod {
+                    self.help_open = false;
+                    self.mark_dirty();
+                    return;
+                }
                 if let Some((_, url)) = self.update.clone() {
                     match event.logical_key {
                         Key::Named(NamedKey::Enter) => mouse::open_url(&url),
