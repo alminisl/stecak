@@ -152,11 +152,13 @@ pub struct AgentConfig {
     pub notifications: bool,
     /// One-shot command for "Ask AI" (⌘I); the prompt is appended as its last argument.
     pub ask_command: String,
+    /// Bar under the panes showing how full a Claude Code session's context window is.
+    pub context_bar: bool,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { command: "claude".into(), notifications: true, ask_command: "claude -p --model haiku".into() }
+        Self { command: "claude".into(), notifications: true, ask_command: "claude -p --model haiku".into(), context_bar: true }
     }
 }
 

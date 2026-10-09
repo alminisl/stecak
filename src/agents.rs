@@ -195,7 +195,18 @@ pub fn process_name(pid: i32) -> Option<String> {
     let mut buf = [0u8; 256];
     // SAFETY: proc_name writes at most buf.len() bytes and returns the length written.
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+    let name = (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())?;
+    // Claude Code's native installer runs ~/.local/share/claude/versions/<version>, so the
+    // process is named like "2.1.295": recognize it by its path.
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: proc_pidpath writes at most path.len() bytes and returns the length written.
+        let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if n > 0 && String::from_utf8_lossy(&path[..n as usize]).contains("/claude/versions/") {
+            return Some("claude".into());
+        }
+    }
+    Some(name)
 }
 
 #[cfg(target_os = "linux")]
@@ -211,11 +222,17 @@ pub fn process_name(_pid: i32) -> Option<String> {
 /// The session a running Claude Code process is in: Claude Code keeps
 /// `~/.claude/sessions/<pid>.json` with its current `sessionId` (updated on /clear, /resume).
 pub fn claude_session_id(pid: i32) -> Option<String> {
+    claude_session(pid).map(|s| s.0)
+}
+
+/// The running Claude Code process's session id and folder.
+pub fn claude_session(pid: i32) -> Option<(String, PathBuf)> {
     let path = dirs::home_dir()?.join(".claude/sessions").join(format!("{pid}.json"));
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let id = v["sessionId"].as_str()?;
     // It becomes a shell argument: accept only what session ids look like.
-    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| id.to_string())
+    let ok = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    ok.then(|| (id.to_string(), v["cwd"].as_str().unwrap_or_default().into()))
 }
 
 pub fn is_agent(process: &str) -> bool {

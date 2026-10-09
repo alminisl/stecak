@@ -49,6 +49,8 @@ pub enum UserEvent {
     AgentReady(PaneId),
     /// Press Enter in a pane (after pasting a prompt into an agent).
     Submit(PaneId),
+    /// `/context` finished for a folder (None if it failed).
+    ContextBreakdown(std::path::PathBuf, Option<crate::context::Breakdown>),
 }
 
 pub struct GridSize {

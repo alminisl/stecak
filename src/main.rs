@@ -11,6 +11,7 @@ mod ai;
 mod bgimage;
 mod browser;
 mod config;
+mod context;
 mod draw;
 mod input;
 mod layout;
@@ -68,6 +69,16 @@ enum UpdateUi {
 struct Tab {
     root: Node,
     focus: PaneId,
+}
+
+/// The Claude Code session the context bar is showing.
+struct ContextState {
+    session: String,
+    cwd: PathBuf,
+    transcript: Option<PathBuf>,
+    mtime: Option<SystemTime>,
+    /// Tokens in context after the last turn, and its model.
+    used: Option<(u64, String)>,
 }
 
 /// The "Ask AI" bar (⌘I) at the bottom of a pane.
@@ -151,6 +162,12 @@ struct App {
     help_open: bool,
     /// Tab under the mouse (shows its close ×).
     hover_tab: Option<usize>,
+    /// Context bar: the session shown, when it was last checked (and for which tab/pane/setting),
+    /// the mouse is over it, and `/context` breakdowns per folder (None while loading).
+    context: Option<ContextState>,
+    context_checked: Option<(Instant, usize, Option<PaneId>, bool)>,
+    context_hover: bool,
+    breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// The macOS menu bar; must stay alive for the app's lifetime.
     #[cfg(target_os = "macos")]
     _menu: Option<muda::Menu>,
@@ -221,6 +238,10 @@ impl App {
             #[cfg(target_os = "macos")]
             _menu: None,
             hover_tab: None,
+            context: None,
+            context_checked: None,
+            context_hover: false,
+            breakdowns: HashMap::new(),
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
@@ -246,6 +267,11 @@ impl App {
         self.titlebar_h() + if show { (self.r().cell().1 * 1.7).round() } else { 0.0 }
     }
 
+    /// The context bar under the panes, while a Claude Code session is in the active tab.
+    fn context_bar_h(&self) -> f32 {
+        if self.context.is_some() { (self.r().cell().1 * 1.5).round() } else { 0.0 }
+    }
+
     /// Geometry of every pane in tab `tab`.
     fn geometry(&self, tab: usize) -> (Vec<PaneGeom>, Vec<Divider>) {
         let Some(t) = self.tabs.get(tab) else { return (vec![], vec![]) };
@@ -256,7 +282,8 @@ impl App {
         let pad = (self.config.window.padding * r.scale).round();
         let gap = (layout::DIVIDER * r.scale).round().max(1.0);
         let (mut rects, mut dividers) = (vec![], vec![]);
-        t.root.layout(Rect { x: 0.0, y: top, w, h: h - top }, gap, &mut rects, &mut dividers);
+        let bottom = self.context_bar_h();
+        t.root.layout(Rect { x: 0.0, y: top, w, h: h - top - bottom }, gap, &mut rects, &mut dividers);
         let geoms = rects
             .into_iter()
             .map(|(id, rect)| {
@@ -481,6 +508,63 @@ impl App {
         t.root.leaves(&mut ids);
         ids.sort_by_key(|&id| id != t.focus);
         ids.into_iter().find(|&id| self.is_agent_pane(id))
+    }
+
+    /// The Claude Code pane in the active tab (the focused one first): (session id, folder).
+    fn claude_in_tab(&self) -> Option<(String, PathBuf)> {
+        let t = self.tabs.get(self.active)?;
+        let mut ids = vec![];
+        t.root.leaves(&mut ids);
+        ids.sort_by_key(|&id| id != t.focus);
+        ids.into_iter().find_map(|id| {
+            let p = self.panes.get(&id)?;
+            if !p.foreground_process()?.to_lowercase().contains("claude") {
+                return None;
+            }
+            let (session, cwd) = agents::claude_session(p.foreground_pid()?)?;
+            let cwd = if cwd.as_os_str().is_empty() { p.cwd()? } else { cwd };
+            Some((session, cwd))
+        })
+    }
+
+    /// Refresh the context bar: at most once a second (or right away when the tab, focus or
+    /// setting changed), re-reading the transcript only when it changed on disk.
+    fn poll_context(&mut self) {
+        let enabled = self.config.agent.context_bar;
+        let key = (self.active, self.focused_id(), enabled);
+        if self.context_checked.is_some_and(|(t, a, f, e)| (a, f, e) == key && t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.context_checked = Some((Instant::now(), key.0, key.1, key.2));
+        let had = self.context.is_some();
+        match enabled.then(|| self.claude_in_tab()).flatten() {
+            None => self.context = None,
+            Some((session, cwd)) => {
+                if self.context.as_ref().is_none_or(|c| c.session != session) {
+                    self.context = Some(ContextState { session, cwd: cwd.clone(), transcript: None, mtime: None, used: None });
+                    self.dirty = true;
+                }
+                let c = self.context.as_mut().unwrap();
+                if c.transcript.is_none() {
+                    c.transcript = context::transcript_path(&c.session);
+                }
+                let mtime = c.transcript.as_ref().and_then(|p| p.metadata().ok()?.modified().ok());
+                if mtime != c.mtime {
+                    c.mtime = mtime;
+                    c.used = c.transcript.as_deref().and_then(context::last_usage);
+                    self.dirty = true;
+                }
+                // The breakdown barely changes within a session: refresh it every 10 minutes.
+                if self.breakdowns.get(&cwd).is_none_or(|b| b.0.elapsed() > Duration::from_secs(600)) {
+                    let old = self.breakdowns.remove(&cwd).and_then(|b| b.1);
+                    self.breakdowns.insert(cwd.clone(), (Instant::now(), old));
+                    context::fetch_async(cwd, self.proxy.clone());
+                }
+            }
+        }
+        if had != self.context.is_some() {
+            self.resize_all();
+        }
     }
 
     /// Paste `text` into the tab's agent (opening one in a split if there's none), and press
@@ -772,11 +856,16 @@ impl App {
                 self.mark_dirty();
             }
             Action::Copy => self.copy(),
-            Action::Paste => {
-                if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                    self.paste_text(&text);
+            Action::Paste => match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                Ok(text) if !text.is_empty() => self.paste_text(&text),
+                // No text (e.g. a screenshot): agents read images from the clipboard themselves
+                // when they get Ctrl+V, the key Claude Code and Codex use for pasting images.
+                _ => {
+                    if let Some(id) = self.focused_id().filter(|&id| self.is_agent_pane(id)) {
+                        self.panes[&id].write(b"\x16");
+                    }
                 }
-            }
+            },
             Action::Find => {
                 if let Some(id) = self.focused_id() {
                     self.search.open(id);
@@ -1077,6 +1166,12 @@ impl App {
                 if self.ask.open {
                     log::info!("dump ask: busy={} error={:?}", self.ask.busy, self.ask.error);
                 }
+                if let Some(c) = &self.context {
+                    use alacritty_terminal::grid::Dimensions;
+                    let b = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
+                    let rows = self.focused_id().and_then(|id| self.panes.get(&id)).map(|p| p.term.lock().screen_lines());
+                    log::info!("dump context: session={} used={:?} rows={rows:?} breakdown={:?}", c.session, c.used, b.map(|b| b.rows(c.used.as_ref().map_or(b.overhead(), |u| u.0))));
+                }
             }
             "send" => self.send_selection(),
             "check-update" => update::check_async(self.proxy.clone(), true),
@@ -1353,6 +1448,11 @@ impl App {
             self.hover_tab = hover_tab;
             self.mark_dirty();
         }
+        let over_context = self.context.is_some() && y >= self.r().size().1 - self.context_bar_h();
+        if over_context != self.context_hover {
+            self.context_hover = over_context;
+            self.mark_dirty();
+        }
         match self.drag.clone() {
             Some(Drag::Divider(d)) => {
                 let (x, y) = self.mouse;
@@ -1464,6 +1564,7 @@ impl App {
 
     fn draw(&mut self) {
         let t0 = Instant::now();
+        self.poll_context();
         let atlas_gen = self.r().atlas_gen();
         // Output arriving from now on needs another frame.
         self.wakeup_pending.store(false, Ordering::Release);
@@ -1585,6 +1686,10 @@ impl App {
         for d in &dividers {
             let d = d.rect;
             r.rect(d.x, d.y, d.w, d.h, rgba(theme.tab_active, 1.0));
+        }
+        if let Some(c) = &self.context {
+            let breakdown = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
+            draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover);
         }
 
         // Tab bar.
@@ -1894,6 +1999,118 @@ fn wait_until_settled(id: PaneId, last_output: Arc<AtomicU64>, proxy: EventLoopP
     });
 }
 
+/// Color for a `/context` category.
+fn category_color(theme: &Theme, name: &str) -> [f32; 3] {
+    let n = name.to_lowercase();
+    let i = if n.starts_with("system prompt") {
+        4
+    } else if n.starts_with("system tools") {
+        12
+    } else if n.starts_with("mcp") {
+        6
+    } else if n.starts_with("memory") {
+        2
+    } else if n.starts_with("skills") {
+        5
+    } else if n.contains("agent") {
+        13
+    } else if n.starts_with("messages") {
+        3
+    } else if n.starts_with("autocompact") {
+        1
+    } else {
+        8
+    };
+    theme.palette[i]
+}
+
+/// The context bar under the panes: how full the Claude Code session's context window is,
+/// split by category, with the full breakdown in a panel while the mouse is over it.
+fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)>, b: Option<&context::Breakdown>, hover: bool) {
+    let (cw, ch) = r.cell();
+    let (win_w, win_h) = r.size();
+    let h = (ch * 1.5).round();
+    let y = win_h - h;
+    let ty = y + ((h - ch) / 2.0).round();
+    // Before the first reply the context is just the overhead /context reports.
+    let tokens = used.map(|u| u.0).or(b.map(|b| b.overhead())).unwrap_or(0);
+    let window = b.map(|b| b.window).unwrap_or(if tokens > 200_000 { 1_000_000 } else { 200_000 });
+    let buffer = b.map_or(0, |b| b.buffer());
+    let usable = window.saturating_sub(buffer).max(1);
+    let full = tokens as f32 / usable as f32;
+    r.rect(0.0, y, win_w, h, rgba(theme.tab_bar, 0.97));
+    r.rect(0.0, y, win_w, r.scale.max(1.0), rgba(theme.fg, 0.08));
+
+    let amber = theme.palette[3];
+    r.text("✻ Context", cw, ty, win_w, rgba(amber, 1.0));
+    let mut right = format!("{} / {}  {:.0}%", context::short(tokens), context::short(window), tokens as f32 / window as f32 * 100.0);
+    if buffer > 0 {
+        right += &format!(" · {:.0}% to compact", ((1.0 - full) * 100.0).max(0.0));
+    }
+    let rx = win_w - cw - right.chars().count() as f32 * cw;
+    let color = if full > 0.85 { theme.palette[1] } else if full > 0.6 { amber } else { theme.fg };
+    r.text(&right, rx, ty, win_w, rgba(color, if full > 0.6 { 1.0 } else { 0.7 }));
+
+    // The bar: one segment per category, the autocompact buffer reserved at the right end.
+    let (x0, x1) = (11.0 * cw, rx - 2.0 * cw);
+    if x1 > x0 + 4.0 * cw {
+        let bh = (ch * 0.45).round();
+        let by = y + ((h - bh) / 2.0).round();
+        let px = |t: u64| (x1 - x0) * t as f32 / window as f32;
+        r.rect(x0, by, x1 - x0, bh, rgba(theme.fg, 0.08));
+        let mut x = x0;
+        let segments = match b {
+            Some(b) => b.rows(tokens).into_iter().filter(|(n, _)| context::Breakdown::is_loaded(n) && !n.starts_with("Free") && !n.starts_with("Autocompact")).collect(),
+            None => vec![(context::MESSAGES.to_string(), tokens)],
+        };
+        for (name, t) in segments {
+            let w = px(t).min(x1 - x);
+            r.rect(x, by, w, bh, rgba(category_color(theme, &name), 1.0));
+            x += w;
+        }
+        if buffer > 0 {
+            let w = px(buffer);
+            r.rect(x1 - w, by, w, bh, rgba(theme.palette[1], 0.3));
+        }
+    }
+
+    if !hover {
+        return;
+    }
+    let lh = (ch * 1.35).round();
+    let rows = b.map(|b| b.rows(tokens)).unwrap_or_default();
+    let w = (cw * 46.0).min(win_w - 2.0 * cw);
+    let ph = lh * (rows.len().max(1) as f32 + 3.0);
+    let (px0, py0) = (win_w - w - cw, y - ph - 4.0 * r.scale);
+    r.rect(px0, py0, w, ph, rgba(theme.tab_bar, 0.98));
+    r.rect(px0, py0, w, r.scale.max(1.0), rgba(amber, 1.0));
+    let pad = 2.0 * cw;
+    let dy = ((lh - ch) / 2.0).round();
+    let model = used.map(|u| u.1.as_str()).filter(|m| !m.is_empty()).or(b.map(|b| b.model.as_str())).unwrap_or("Claude Code");
+    r.text(model, px0 + pad, py0 + lh * 0.3 + dy, px0 + w - pad, rgba(theme.fg, 1.0));
+    let ry0 = py0 + lh * 1.5;
+    if rows.is_empty() {
+        r.text("Reading /context…", px0 + pad, ry0 + dy, px0 + w - pad, rgba(theme.fg, 0.55));
+    }
+    let (tok_x, pct_x) = (px0 + w - pad - 15.0 * cw, px0 + w - pad - 6.0 * cw);
+    for (i, (name, t)) in rows.iter().enumerate() {
+        let ry = ry0 + i as f32 * lh + dy;
+        let loaded = context::Breakdown::is_loaded(name);
+        let a = if loaded { 0.9 } else { 0.45 };
+        if loaded && !name.starts_with("Free") {
+            let alpha = if name.starts_with("Autocompact") { 0.3 } else { 1.0 };
+            r.rect(px0 + pad, ry + ch * 0.25, cw * 0.8, ch * 0.5, rgba(category_color(theme, name), alpha));
+        }
+        r.text(name, px0 + pad + 2.0 * cw, ry, tok_x - cw, rgba(theme.fg, a));
+        let tok = context::short(*t);
+        let pct = format!("{:.1}%", *t as f32 / window as f32 * 100.0);
+        r.text(&tok, pct_x - cw - tok.chars().count() as f32 * cw, ry, pct_x, rgba(theme.fg, a));
+        r.text(&pct, px0 + w - pad - pct.chars().count() as f32 * cw, ry, px0 + w, rgba(theme.fg, a * 0.7));
+    }
+    let note = "estimated · deferred tools load on demand";
+    r.text(note, px0 + pad, py0 + ph - lh + dy - lh * 0.2, px0 + w - pad, rgba(theme.fg, 0.4));
+}
+
 /// The Ask AI bar at the bottom of the pane.
 fn draw_ask_bar(r: &mut Renderer, theme: &Theme, ask: &Ask, g: &PaneGeom, now: u64, command: &str) {
     let (cw, ch) = r.cell();
@@ -2172,6 +2389,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
 
+            UserEvent::ContextBreakdown(cwd, breakdown) => {
+                // On failure keep the previous breakdown (if any); retried after 10 minutes.
+                let entry = self.breakdowns.entry(cwd).or_insert((Instant::now(), None));
+                entry.0 = Instant::now();
+                if breakdown.is_some() {
+                    entry.1 = breakdown;
+                }
+                self.mark_dirty();
+            }
             UserEvent::BackgroundImage(img) => {
                 self.renderer.as_mut().unwrap().set_background_image(img);
                 self.mark_dirty();

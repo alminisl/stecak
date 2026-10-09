@@ -161,6 +161,8 @@ The image is decoded on a worker thread and resized to the window, so a 4K wallp
 - **Ask AI for a command (⌘I):** describe what you want ("find files over 100 MB here") and the command is typed at your prompt for you to check. It's never run for you. This uses `claude -p` (`agent.ask_command`), so there's no API key to set up.
 - **Explain last error (⌘⇧E):** the last command, its exit code and its output go to your agent, which explains what went wrong. If no agent is open in the tab, one opens in a split. This needs zsh shell integration (on by default). Without it, the agent gets what's on screen instead.
 - **Send selection to agent (⌘⇧L):** pastes the selected text (or, with nothing selected, the last command and its output) into the agent as context, so you can type your question after it.
+- **Context bar:** while Claude Code runs in the tab, a bar under the panes fills up as its context window does, colored by what's in it (system prompt, tools, MCP, memory files, skills, messages) with the autocompact buffer marked at the end, plus tokens used, % of the window and % left until auto-compact. Hover it for the full breakdown. The live total comes from the session transcript; the breakdown comes from running Claude Code's own `/context` in that folder in the background (no API call, refreshed every 10 minutes). Turn it off with `agent.context_bar: false` or in Settings.
+- **Paste images into agents:** ⌘V with an image (e.g. a screenshot) on the clipboard sends it to Claude Code or Codex.
 - **Sessions come back:** when you close the window, each pane's folder is saved, along with the exact Claude Code conversation running in it. At the next launch, every tab and split reopens with `claude --resume <that session>`. Codex panes resume their latest conversation in that folder. When you quit the agent, you're left at a shell.
 
 ```yaml
@@ -168,6 +170,7 @@ agent:
   command: claude                        # or "codex"
   notifications: true
   ask_command: claude -p --model haiku   # one-shot command for ⌘I; the prompt is appended
+  context_bar: true                      # context-window bar under Claude Code panes
 restore_session: true    # reopen tabs, splits, folders and agent sessions at launch
                          # (Settings › "Restore sessions at launch"; off also forgets the saved one)
 shell_integration: true  # zsh reports each command and its exit status (OSC 133)
