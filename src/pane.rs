@@ -33,6 +33,8 @@ pub enum UserEvent {
     BackgroundImage(Option<(Vec<u8>, u32, u32)>),
     /// A pane rang the bell or sent a desktop notification (agents waiting for input).
     Notify(PaneId, Option<String>),
+    /// A newer release exists: (version, release page URL).
+    UpdateAvailable(String, String),
     /// One step of a scripted UI session (STECAK_DEMO), used for automated visual tests.
     Demo(String),
 }

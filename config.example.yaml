@@ -14,6 +14,7 @@ window:
   rows: 30
   present_mode: mailbox  # mailbox | fifo | immediate
 
+check_for_updates: true   # ask GitHub for a newer release at startup (offers it; never auto-installs)
 scrollback: 2000       # ~5 MB per 1,000 lines at 100 columns
 option_as_alt: true    # macOS: Option sends Alt/Meta
 

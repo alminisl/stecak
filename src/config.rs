@@ -20,6 +20,8 @@ pub struct Config {
     pub background_image: BackgroundImageConfig,
     pub bosancica: BosancicaConfig,
     pub scrollback: usize,
+    /// Check GitHub for a newer release at startup and offer it (no auto-install).
+    pub check_for_updates: bool,
     /// Treat macOS Option key as Alt (sends ESC-prefixed sequences).
     pub option_as_alt: bool,
 }
@@ -165,6 +167,7 @@ impl Default for Config {
             background_image: BackgroundImageConfig::default(),
             bosancica: BosancicaConfig::default(),
             scrollback: 2_000,
+            check_for_updates: true,
             option_as_alt: true,
         }
     }

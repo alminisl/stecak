@@ -20,6 +20,7 @@ mod search;
 mod settings;
 mod text;
 mod theme;
+mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -110,6 +111,9 @@ struct App {
     /// Panes that rang the bell / notified while you were looking elsewhere.
     attention: HashSet<PaneId>,
     last_notified: HashMap<PaneId, Instant>,
+    /// A newer release to offer: (version, release page URL), and where its buttons were drawn.
+    update: Option<(String, String)>,
+    update_buttons: Option<(Rect, Rect)>,
     /// An agent is working in some tab: keep redrawing the tab animation.
     animating: bool,
     bg_gen: Arc<AtomicU64>,
@@ -164,6 +168,8 @@ impl App {
             sessions_layout: None,
             attention: HashSet::new(),
             last_notified: HashMap::new(),
+            update: None,
+            update_buttons: None,
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
@@ -624,6 +630,7 @@ impl App {
                 self.sessions.open();
                 self.sessions.query = arg.to_string();
             }
+            "update" => self.update = Some((arg.to_string(), String::new())),
             "attention" => {
                 if let Some(id) = self.tabs.first().map(|t| t.focus) {
                     self.attention.insert(id);
@@ -734,6 +741,16 @@ impl App {
 
     fn on_press(&mut self, button: MouseButton, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        if let (Some((_, url)), Some((download, later))) = (self.update.clone(), self.update_buttons) {
+            if download.contains(x, y) {
+                mouse::open_url(&url);
+            }
+            if download.contains(x, y) || later.contains(x, y) {
+                self.update = None;
+                self.mark_dirty();
+                return;
+            }
+        }
         if self.sessions.open {
             match self.sessions_layout {
                 Some((panel, y0, lh, first)) if panel.contains(x, y) => {
@@ -1123,6 +1140,7 @@ impl App {
             r.text("+", plus_x + (plus_w - cw) / 2.0, text_y, plus_x + plus_w, rgba(theme.fg, 0.7));
         }
 
+        self.update_buttons = self.update.as_ref().map(|(v, _)| draw_update(r, theme, v));
         self.sessions_layout = None;
         if self.sessions.open {
             self.sessions_layout = Some(draw_sessions(r, theme, &self.sessions));
@@ -1203,6 +1221,32 @@ fn draw_search_bar(r: &mut Renderer, theme: &Theme, search: &Search, g: &PaneGeo
     r.text(&text, g.rect.x + cw, ty, g.rect.x + g.rect.w - cw, rgba(theme.fg, 1.0));
     let color = if search.no_match { theme.palette[1] } else { theme.fg };
     r.text(status, end + 2.0 * cw, ty, g.rect.x + g.rect.w - cw, rgba(color, 0.6));
+}
+
+/// "A new version is available" card at the top of the window. Returns the button rects.
+fn draw_update(r: &mut Renderer, theme: &Theme, version: &str) -> (Rect, Rect) {
+    let (cw, ch) = r.cell();
+    let (win_w, _) = r.size();
+    let lh = (ch * 1.5).round();
+    let w = (cw * 64.0).min(win_w - 4.0 * cw);
+    let (x, y) = (((win_w - w) / 2.0).round(), (ch * 3.0).round());
+    let h = lh * 3.4;
+    r.rect(x, y, w, h, rgba(theme.tab_bar, 0.98));
+    r.rect(x, y, w, r.scale.max(1.0), rgba(theme.palette[3], 1.0));
+    let pad = 2.0 * cw;
+    let dy = ((lh - ch) / 2.0).round();
+    r.text(&format!("Stećak {version} is available"), x + pad, y + lh * 0.3 + dy, x + w - pad, rgba(theme.fg, 1.0));
+    r.text(&format!("You have {}", env!("CARGO_PKG_VERSION")), x + pad, y + lh * 1.1 + dy, x + w - pad, rgba(theme.fg, 0.55));
+    let by = y + lh * 2.1;
+    let button = |r: &mut Renderer, label: &str, bx: f32, primary: bool| {
+        let bw = (label.chars().count() as f32 + 3.0) * cw;
+        r.rect(bx, by, bw, lh, if primary { rgba(theme.palette[3], 1.0) } else { rgba(theme.tab_active, 1.0) });
+        r.text(label, bx + 1.5 * cw, by + dy, bx + bw, if primary { rgba(theme.bg, 1.0) } else { rgba(theme.fg, 0.9) });
+        Rect { x: bx, y: by, w: bw, h: lh }
+    };
+    let later = button(r, "Later  esc", x + w - pad - 13.0 * cw, false);
+    let download = button(r, "Download  ⏎", later.x - 16.0 * cw, true);
+    (download, later)
 }
 
 /// The session browser panel. Returns (panel rect, first row y, row height, first index)
@@ -1383,6 +1427,9 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.new_tab();
         self.load_background();
+        if self.config.check_for_updates && std::env::var_os("STECAK_DEMO").is_none() {
+            update::check_async(self.proxy.clone());
+        }
 
         // STECAK_DEMO="split-h;find:foo;…" replays UI actions for automated visual tests,
         // without synthesizing OS-level keystrokes.
@@ -1414,6 +1461,10 @@ impl ApplicationHandler<UserEvent> for App {
                 Err(e) => log::error!("config error (keeping previous config): {e}"),
             },
             UserEvent::Notify(id, msg) => self.on_notify(id, msg),
+            UserEvent::UpdateAvailable(version, url) => {
+                self.update = Some((version, url));
+                self.mark_dirty();
+            }
             UserEvent::Demo(step) => self.demo_step(&step, event_loop),
             UserEvent::BackgroundImage(img) => {
                 self.renderer.as_mut().unwrap().set_background_image(img);
@@ -1459,6 +1510,16 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { .. } if !self.preedit.is_empty() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let app_mod = input::is_app_modifier(self.modifiers);
+                if let Some((_, url)) = self.update.clone() {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Enter) => mouse::open_url(&url),
+                        Key::Named(NamedKey::Escape) => {}
+                        _ => return,
+                    }
+                    self.update = None;
+                    self.mark_dirty();
+                    return;
+                }
                 if self.sessions.open && !app_mod && self.sessions_key(&event) {
                     return;
                 }
