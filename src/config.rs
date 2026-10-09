@@ -20,6 +20,8 @@ pub struct Config {
     pub background_image: BackgroundImageConfig,
     pub bosancica: BosancicaConfig,
     pub scrollback: usize,
+    /// Show the welcome screen (a stećak and an inscription) in the first tab at startup.
+    pub welcome: bool,
     /// Check GitHub for a newer release at startup and offer it (no auto-install).
     pub check_for_updates: bool,
     /// Treat macOS Option key as Alt (sends ESC-prefixed sequences).
@@ -167,6 +169,7 @@ impl Default for Config {
             background_image: BackgroundImageConfig::default(),
             bosancica: BosancicaConfig::default(),
             scrollback: 2_000,
+            welcome: true,
             check_for_updates: true,
             option_as_alt: true,
         }

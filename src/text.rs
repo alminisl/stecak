@@ -29,6 +29,7 @@ const FIRST_FALLBACK: usize = 5;
 /// A font face backed by a memory-mapped file. Mapped pages are clean and shared with the
 /// OS file cache, so they don't count toward our footprint (unlike copying the file into a
 /// Vec, which for a CJK collection alone is tens of MB).
+#[derive(Clone)]
 struct Face {
     data: Arc<memmap2::Mmap>,
     offset: u32,
@@ -92,6 +93,10 @@ pub struct Text {
     /// Every installed face, searched last (like the OS's own font cascade) for characters no
     /// configured font has. Only paths are kept; a face is opened only when it matches.
     system_fonts: Vec<FontSource>,
+    /// The system fonts, opened (memory-mapped) once on the first miss so every later miss
+    /// is just cmap lookups. Re-opening ~1000 files per character made unicode-heavy output
+    /// (vtebench `unicode`) 300× slower.
+    system_faces: Option<Vec<Face>>,
     /// Characters missing from the primary font → face that has them.
     fallback_for: HashMap<char, u16>,
     pub px: f32,
@@ -209,6 +214,7 @@ impl Text {
             bosancica_embolden,
             fallbacks,
             system_fonts,
+            system_faces: None,
             fallback_for: HashMap::new(),
             px,
             cell_w,
@@ -254,7 +260,9 @@ impl Text {
         if found == style as u16 {
             // Last resort: any installed font with the glyph (e.g. ⏵ that Claude Code prints).
             // Runs once per missing character; the answer, found or not, is cached below.
-            if let Some(face) = self.system_fonts.iter().find_map(|src| Face::open(src).filter(|f| f.font().charmap().map(c) != 0)) {
+            let fonts = &self.system_fonts;
+            let faces = self.system_faces.get_or_insert_with(|| fonts.iter().filter_map(Face::open).collect());
+            if let Some(face) = faces.iter().find(|f| f.font().charmap().map(c) != 0).cloned() {
                 log::info!("system fallback for {c:?}");
                 self.faces.push(Some(face));
                 found = (self.faces.len() - 1) as u16;

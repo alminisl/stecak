@@ -13,6 +13,8 @@ mod config;
 mod draw;
 mod input;
 mod layout;
+#[cfg(target_os = "macos")]
+mod menu;
 mod mouse;
 mod pane;
 mod renderer;
@@ -21,6 +23,7 @@ mod settings;
 mod text;
 mod theme;
 mod update;
+mod welcome;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -48,6 +51,16 @@ use renderer::Renderer;
 use search::Search;
 use settings::Settings;
 use theme::{rgba, Theme};
+
+/// The update popup's state.
+#[derive(Clone)]
+enum UpdateUi {
+    Available(update::Release),
+    UpToDate,
+    Installing(String),
+    Ready(PathBuf),
+    Failed(String, String),
+}
 
 struct Tab {
     root: Node,
@@ -112,12 +125,15 @@ struct App {
     attention: HashSet<PaneId>,
     last_notified: HashMap<PaneId, Instant>,
     /// A newer release to offer: (version, release page URL), and where its buttons were drawn.
-    update: Option<(String, String)>,
+    update: Option<UpdateUi>,
     update_buttons: Option<(Rect, Rect)>,
     /// Keyboard shortcut legend (⌘/) is showing.
     help_open: bool,
     /// Tab under the mouse (shows its close ×).
     hover_tab: Option<usize>,
+    /// The macOS menu bar; must stay alive for the app's lifetime.
+    #[cfg(target_os = "macos")]
+    _menu: Option<muda::Menu>,
     /// The previous frame was a redraw forced by a glyph-atlas reset.
     atlas_retry: bool,
     /// An agent is working in some tab: keep redrawing the tab animation.
@@ -178,6 +194,8 @@ impl App {
             update_buttons: None,
             help_open: false,
             atlas_retry: false,
+            #[cfg(target_os = "macos")]
+            _menu: None,
             hover_tab: None,
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
@@ -515,6 +533,68 @@ impl App {
         }
     }
 
+    /// A menu bar item: map its id onto the same actions the shortcuts use.
+    fn menu_action(&mut self, id: &str, event_loop: &ActiveEventLoop) {
+        let action = match id {
+            "check-updates" => return update::check_async(self.proxy.clone(), true),
+            "open-config" => return self.open_config_file(),
+            "website" => return mouse::open_url("https://alminisl.github.io/stecak/"),
+            "issue" => return mouse::open_url("https://github.com/alminisl/stecak/issues/new"),
+            "settings" => Action::OpenSettings,
+            "new-tab" => Action::NewTab,
+            "split-right" => Action::Split(Dir::Horizontal),
+            "split-down" => Action::Split(Dir::Vertical),
+            "agent" => Action::AgentSplit,
+            "sessions" => Action::Sessions,
+            "close" => Action::ClosePane,
+            "copy" => Action::Copy,
+            "paste" => Action::Paste,
+            "find" => Action::Find,
+            "find-next" => Action::FindNext,
+            "find-prev" => Action::FindPrev,
+            "clear" => Action::ClearScrollback,
+            "bigger" => Action::FontBigger,
+            "smaller" => Action::FontSmaller,
+            "actual-size" => Action::FontReset,
+            "bosancica" => Action::ToggleBosancica,
+            "next-tab" => Action::NextTab,
+            "prev-tab" => Action::PrevTab,
+            "next-pane" => Action::NextPane,
+            "prev-pane" => Action::PrevPane,
+            "shortcuts" => Action::Shortcuts,
+            _ => return,
+        };
+        self.handle_action(action, event_loop);
+    }
+
+    /// The update popup's button (primary = ⏎, otherwise esc/Later).
+    fn update_action(&mut self, primary: bool, event_loop: &ActiveEventLoop) {
+        let Some(state) = self.update.clone() else { return };
+        self.update = match (state, primary) {
+            (UpdateUi::Available(rel), true) if update::can_install(&rel) => {
+                let v = rel.version.clone();
+                update::install_async(rel, self.proxy.clone());
+                Some(UpdateUi::Installing(v))
+            }
+            (UpdateUi::Available(rel), true) => {
+                mouse::open_url(&rel.page);
+                None
+            }
+            (UpdateUi::Ready(app), true) => {
+                update::relaunch(&app);
+                event_loop.exit();
+                None
+            }
+            (UpdateUi::Failed(_, page), true) => {
+                mouse::open_url(&page);
+                None
+            }
+            // Installing keeps going in the background; its result reopens the popup.
+            (UpdateUi::Installing(_), _) | (UpdateUi::UpToDate, _) | (_, false) => None,
+        };
+        self.mark_dirty();
+    }
+
     /// A pane rang the bell or sent a notification (agents do this when they finish or need
     /// permission). Mark its tab, and if you're not looking at it, tell the OS.
     fn on_notify(&mut self, id: PaneId, msg: Option<String>) {
@@ -657,7 +737,9 @@ impl App {
                 self.sessions.query = arg.to_string();
             }
             "help" => self.help_open = true,
-            "update" => self.update = Some((arg.to_string(), String::new())),
+            "check-update" => update::check_async(self.proxy.clone(), true),
+            "update-go" => self.update_action(true, event_loop),
+            "update" => self.update = Some(UpdateUi::Available(update::Release { version: arg.to_string(), page: String::new(), dmg: None })),
             "attention" => {
                 if let Some(id) = self.tabs.first().map(|t| t.focus) {
                     self.attention.insert(id);
@@ -773,14 +855,9 @@ impl App {
             self.mark_dirty();
             return;
         }
-        if let (Some((_, url)), Some((download, later))) = (self.update.clone(), self.update_buttons) {
-            if download.contains(x, y) {
-                mouse::open_url(&url);
-            }
-            if download.contains(x, y) || later.contains(x, y) {
-                self.update = None;
-                self.mark_dirty();
-                return;
+        if let Some((primary, secondary)) = self.update_buttons {
+            if primary.contains(x, y) || secondary.contains(x, y) {
+                return self.update_action(primary.contains(x, y), event_loop);
             }
         }
         if self.sessions.open {
@@ -1203,7 +1280,19 @@ impl App {
             r.text("⚙", gear_x + (plus_w - cw) / 2.0, text_y, win_w, rgba(theme.fg, 0.6));
         }
 
-        self.update_buttons = self.update.as_ref().map(|(v, _)| draw_update(r, theme, v));
+        self.update_buttons = self.update.as_ref().and_then(|u| {
+            let current = env!("CARGO_PKG_VERSION");
+            match u {
+                UpdateUi::Available(rel) => {
+                    let action = if update::can_install(rel) { "Update now" } else { "Download" };
+                    draw_update(r, theme, &format!("Stećak {} is available", rel.version), &format!("You have {current}"), Some(action), "Later")
+                }
+                UpdateUi::UpToDate => draw_update(r, theme, "You're up to date", &format!("Stećak {current} is the latest version"), None, "OK"),
+                UpdateUi::Installing(v) => draw_update(r, theme, &format!("Updating to {v}…"), "Downloading and verifying the release", None, "Hide"),
+                UpdateUi::Ready(_) => draw_update(r, theme, "Update installed", "Restart Stećak to use the new version", Some("Restart"), "Later"),
+                UpdateUi::Failed(e, _) => draw_update(r, theme, "Update failed", e, Some("Download page"), "Close"),
+            }
+        });
         self.sessions_layout = None;
         if self.sessions.open {
             self.sessions_layout = Some(draw_sessions(r, theme, &self.sessions));
@@ -1327,8 +1416,8 @@ fn draw_shortcuts(r: &mut Renderer, theme: &Theme) {
     r.text(&format!("Config: {config} · reloads on save"), x + pad, y + h - lh * 1.3 + dy, x + w - pad, rgba(theme.fg, 0.5));
 }
 
-/// "A new version is available" card at the top of the window. Returns the button rects.
-fn draw_update(r: &mut Renderer, theme: &Theme, version: &str) -> (Rect, Rect) {
+/// The update popup at the top of the window. Returns (primary, secondary) button rects.
+fn draw_update(r: &mut Renderer, theme: &Theme, title: &str, subtitle: &str, primary: Option<&str>, secondary: &str) -> Option<(Rect, Rect)> {
     let (cw, ch) = r.cell();
     let (win_w, _) = r.size();
     let lh = (ch * 1.5).round();
@@ -1339,18 +1428,22 @@ fn draw_update(r: &mut Renderer, theme: &Theme, version: &str) -> (Rect, Rect) {
     r.rect(x, y, w, r.scale.max(1.0), rgba(theme.palette[3], 1.0));
     let pad = 2.0 * cw;
     let dy = ((lh - ch) / 2.0).round();
-    r.text(&format!("Stećak {version} is available"), x + pad, y + lh * 0.3 + dy, x + w - pad, rgba(theme.fg, 1.0));
-    r.text(&format!("You have {}", env!("CARGO_PKG_VERSION")), x + pad, y + lh * 1.1 + dy, x + w - pad, rgba(theme.fg, 0.55));
+    r.text(title, x + pad, y + lh * 0.3 + dy, x + w - pad, rgba(theme.fg, 1.0));
+    r.text(subtitle, x + pad, y + lh * 1.1 + dy, x + w - pad, rgba(theme.fg, 0.55));
     let by = y + lh * 2.1;
-    let button = |r: &mut Renderer, label: &str, bx: f32, primary: bool| {
+    let button = |r: &mut Renderer, label: &str, right: f32, primary: bool| {
         let bw = (label.chars().count() as f32 + 3.0) * cw;
+        let bx = right - bw;
         r.rect(bx, by, bw, lh, if primary { rgba(theme.palette[3], 1.0) } else { rgba(theme.tab_active, 1.0) });
         r.text(label, bx + 1.5 * cw, by + dy, bx + bw, if primary { rgba(theme.bg, 1.0) } else { rgba(theme.fg, 0.9) });
         Rect { x: bx, y: by, w: bw, h: lh }
     };
-    let later = button(r, "Later  esc", x + w - pad - 13.0 * cw, false);
-    let download = button(r, "Download  ⏎", later.x - 16.0 * cw, true);
-    (download, later)
+    let second = button(r, &format!("{secondary}  esc"), x + w - pad, false);
+    let first = match primary {
+        Some(label) => button(r, &format!("{label}  ⏎"), second.x - cw, true),
+        None => Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    };
+    Some((first, second))
 }
 
 /// The session browser panel. Returns (panel rect, first row y, row height, first index)
@@ -1498,6 +1591,10 @@ impl ApplicationHandler<UserEvent> for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         window.set_cursor(CursorIcon::Text);
         window.set_ime_allowed(true);
+        #[cfg(target_os = "macos")]
+        {
+            self._menu = Some(menu::install(self.proxy.clone()));
+        }
 
         if self.config.window.blur {
             apply_blur(&window, 20);
@@ -1536,9 +1633,17 @@ impl ApplicationHandler<UserEvent> for App {
         window.set_visible(true);
 
         self.new_tab();
+        if self.config.welcome {
+            if let (Some(g), Some(id)) = (self.geometry(self.active).0.first(), self.focused_id()) {
+                let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                if let Some(p) = self.panes.get(&id) {
+                    p.inject(welcome::banner(g.cols, seed).as_bytes());
+                }
+            }
+        }
         self.load_background();
         if self.config.check_for_updates && std::env::var_os("STECAK_DEMO").is_none() {
-            update::check_async(self.proxy.clone());
+            update::check_async(self.proxy.clone(), false);
         }
 
         // STECAK_DEMO="split-h;find:foo;…" replays UI actions for automated visual tests,
@@ -1571,8 +1676,24 @@ impl ApplicationHandler<UserEvent> for App {
                 Err(e) => log::error!("config error (keeping previous config): {e}"),
             },
             UserEvent::Notify(id, msg) => self.on_notify(id, msg),
-            UserEvent::UpdateAvailable(version, url) => {
-                self.update = Some((version, url));
+            UserEvent::UpdateAvailable(release) => {
+                self.update = Some(UpdateUi::Available(release));
+                self.mark_dirty();
+            }
+            UserEvent::Menu(id) => self.menu_action(&id, event_loop),
+            UserEvent::UpdateNone(err) => {
+                log::info!("update check: {}", err.as_deref().unwrap_or("up to date"));
+                self.update = Some(match err {
+                    None => UpdateUi::UpToDate,
+                    Some(e) => UpdateUi::Failed(e, "https://github.com/alminisl/stecak/releases/latest".into()),
+                });
+                self.mark_dirty();
+            }
+            UserEvent::UpdateInstalled(result) => {
+                self.update = Some(match result {
+                    Ok(app) => UpdateUi::Ready(app),
+                    Err(e) => UpdateUi::Failed(e, "https://github.com/alminisl/stecak/releases/latest".into()),
+                });
                 self.mark_dirty();
             }
             UserEvent::Demo(step) => self.demo_step(&step, event_loop),
@@ -1625,15 +1746,13 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mark_dirty();
                     return;
                 }
-                if let Some((_, url)) = self.update.clone() {
+                // Update popup: ⏎ = its main action, esc = dismiss; every other key still types.
+                if self.update.is_some() && !app_mod {
                     match event.logical_key {
-                        Key::Named(NamedKey::Enter) => mouse::open_url(&url),
-                        Key::Named(NamedKey::Escape) => {}
-                        _ => return,
+                        Key::Named(NamedKey::Enter) => return self.update_action(true, event_loop),
+                        Key::Named(NamedKey::Escape) => return self.update_action(false, event_loop),
+                        _ => {}
                     }
-                    self.update = None;
-                    self.mark_dirty();
-                    return;
                 }
                 if self.sessions.open && !app_mod && self.sessions_key(&event) {
                     return;
