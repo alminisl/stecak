@@ -7,6 +7,7 @@ use crate::theme::PRESETS;
 #[derive(Clone, Copy, PartialEq)]
 pub enum Item {
     Theme,
+    Font,
     FontSize,
     LineHeight,
     Ligatures,
@@ -22,6 +23,7 @@ pub enum Item {
     OptionAsAlt,
     AlwaysShowTabs,
     Welcome,
+    RestoreSession,
     AgentNotifications,
     CheckUpdates,
     Shortcuts,
@@ -30,6 +32,7 @@ pub enum Item {
 
 pub const ITEMS: &[Item] = &[
     Item::Theme,
+    Item::Font,
     Item::FontSize,
     Item::LineHeight,
     Item::Ligatures,
@@ -45,6 +48,7 @@ pub const ITEMS: &[Item] = &[
     Item::OptionAsAlt,
     Item::AlwaysShowTabs,
     Item::Welcome,
+    Item::RestoreSession,
     Item::AgentNotifications,
     Item::CheckUpdates,
     Item::Shortcuts,
@@ -61,6 +65,8 @@ pub struct Settings {
     pub editing: Option<String>,
     /// Whether the configured Bosančica font is installed (shown next to the toggle).
     pub bosancica_font_ok: bool,
+    /// Installed monospace families the Font row cycles through.
+    pub fonts: Vec<String>,
 }
 
 pub enum Outcome {
@@ -78,6 +84,7 @@ impl Item {
     pub fn label(self) -> &'static str {
         match self {
             Item::Theme => "Theme",
+            Item::Font => "Font",
             Item::FontSize => "Font size",
             Item::LineHeight => "Line height",
             Item::Ligatures => "Ligatures",
@@ -93,6 +100,7 @@ impl Item {
             Item::OptionAsAlt => "Option key as Alt",
             Item::AlwaysShowTabs => "Always show tab bar",
             Item::Welcome => "Welcome screen at launch",
+            Item::RestoreSession => "Reopen tabs at launch",
             Item::AgentNotifications => "Agent notifications",
             Item::CheckUpdates => "Check for updates at launch",
             Item::Shortcuts => "Keyboard shortcuts…",
@@ -103,6 +111,7 @@ impl Item {
     pub fn value(self, c: &Config) -> String {
         match self {
             Item::Theme => PRESETS.iter().find(|p| p.matches(&c.colors)).map_or("Custom".into(), |p| p.name.into()),
+            Item::Font => c.font.family.first().cloned().unwrap_or_default(),
             Item::FontSize => format!("{:.0}", c.font.size),
             Item::LineHeight => format!("{:.2}", c.font.line_height),
             Item::Ligatures => on_off(c.font.ligatures),
@@ -120,6 +129,7 @@ impl Item {
             Item::OptionAsAlt => on_off(c.option_as_alt),
             Item::AlwaysShowTabs => on_off(c.tabs.always_show),
             Item::Welcome => on_off(c.welcome),
+            Item::RestoreSession => on_off(c.restore_session),
             Item::AgentNotifications => on_off(c.agent.notifications),
             Item::CheckUpdates => on_off(c.check_for_updates),
             Item::Shortcuts => if cfg!(target_os = "macos") { "⌘/".into() } else { "Ctrl+Shift+/".into() },
@@ -154,9 +164,11 @@ impl Item {
             Item::OptionAsAlt => c.option_as_alt = !c.option_as_alt,
             Item::AlwaysShowTabs => c.tabs.always_show = !c.tabs.always_show,
             Item::Welcome => c.welcome = !c.welcome,
+            Item::RestoreSession => c.restore_session = !c.restore_session,
             Item::AgentNotifications => c.agent.notifications = !c.agent.notifications,
             Item::CheckUpdates => c.check_for_updates = !c.check_for_updates,
-            Item::OpenFile | Item::Shortcuts => return false,
+            // Needs the installed font list: see Settings::cycle_font.
+            Item::Font | Item::OpenFile | Item::Shortcuts => return false,
         }
         true
     }
@@ -174,6 +186,24 @@ pub enum Key<'a> {
 }
 
 impl Settings {
+    /// The font in use: the first configured family that's installed.
+    fn current_font(&self, cfg: &Config) -> Option<usize> {
+        cfg.font.family.iter().find_map(|f| self.fonts.iter().position(|n| n == f))
+    }
+
+    /// Move to the previous/next installed font; it goes first in `font.family`, and the
+    /// rest of the list stays as fallback.
+    fn cycle_font(&self, c: &mut Config, dir: i32) -> bool {
+        if self.fonts.is_empty() {
+            return false;
+        }
+        let cur = self.current_font(c).map_or(-1, |i| i as i32);
+        let next = self.fonts[(cur + dir).rem_euclid(self.fonts.len() as i32) as usize].clone();
+        c.font.family.retain(|f| *f != next);
+        c.font.family.insert(0, next);
+        true
+    }
+
     pub fn toggle(&mut self) {
         self.open = !self.open;
         self.editing = None;
@@ -208,6 +238,7 @@ impl Settings {
                 self.selected = (self.selected + 1) % ITEMS.len();
                 false
             }
+            Key::Left | Key::Right | Key::Enter if item == Item::Font => self.cycle_font(&mut c, if matches!(key, Key::Left) { -1 } else { 1 }),
             Key::Left => item.adjust(&mut c, -1),
             Key::Right => item.adjust(&mut c, 1),
             Key::Enter => match item {
@@ -237,6 +268,7 @@ impl Settings {
         ITEMS.iter().enumerate().map(move |(i, item)| {
             let value = match (&self.editing, item) {
                 (Some(buf), Item::ImagePath) => format!("{buf}▏"),
+                (_, Item::Font) => self.current_font(cfg).map_or_else(|| item.value(cfg), |i| self.fonts[i].clone()),
                 (_, Item::Bosancica) if !self.bosancica_font_ok => format!("{} — font \"{}\" not found", item.value(cfg), cfg.bosancica.font),
                 _ => item.value(cfg),
             };
@@ -257,6 +289,13 @@ mod tests {
         match s.handle(Key::Right, &cfg) {
             Outcome::Changed(c) => assert!(PRESETS[1].matches(&c.colors)),
             _ => panic!("theme should change"),
+        }
+        // Font: cycles installed families, keeping the old ones as fallback.
+        s.fonts = vec!["Fira Code".into(), "JetBrains Mono".into(), "Menlo".into()];
+        s.handle(Key::Down, &cfg);
+        match s.handle(Key::Right, &cfg) {
+            Outcome::Changed(c) => assert_eq!(c.font.family[..2], ["Menlo".to_string(), "JetBrains Mono".to_string()]),
+            _ => panic!("font should change"),
         }
         s.handle(Key::Down, &cfg);
         match s.handle(Key::Right, &cfg) {
@@ -280,8 +319,12 @@ pub fn shortcuts() -> &'static [(&'static str, &'static str)] {
             ("⌘= / ⌘- / ⌘0", "Font bigger / smaller / reset"),
             ("⌘⇧A", "Open agent (claude) in a split"),
             ("⌘⇧S", "Session browser: resume Claude / Codex"),
+            ("⌘I", "Ask AI for a command (typed, never run)"),
+            ("⌘⇧E", "Explain the last error with the agent"),
+            ("⌘⇧L", "Send selection (or last output) to agent"),
+            ("⌘⇧P", "Command palette: actions, themes, fonts"),
             ("⇧⏎", "Newline in agent prompts"),
-            ("⌘-click", "Open link"),
+            ("⌘-click", "Open link, or file:line in your editor"),
             ("double / triple click", "Select word / line"),
             ("⌘⇧B", "Bosančica mode"),
             ("⌘,", "Settings (and the config file)"),
@@ -299,8 +342,12 @@ pub fn shortcuts() -> &'static [(&'static str, &'static str)] {
             ("Ctrl+Shift+= / - / 0", "Font bigger / smaller / reset"),
             ("Ctrl+Shift+A", "Open agent (claude) in a split"),
             ("Ctrl+Shift+S", "Session browser: resume Claude / Codex"),
+            ("Ctrl+Shift+I", "Ask AI for a command (typed, never run)"),
+            ("Ctrl+Shift+X", "Explain the last error with the agent"),
+            ("Ctrl+Shift+L", "Send selection (or last output) to agent"),
+            ("Ctrl+Shift+P", "Command palette: actions, themes, fonts"),
             ("Shift+Enter", "Newline in agent prompts"),
-            ("Ctrl+click", "Open link"),
+            ("Ctrl+click", "Open link, or file:line in your editor"),
             ("double / triple click", "Select word / line"),
             ("Ctrl+Shift+B", "Bosančica mode"),
             ("Ctrl+Shift+,", "Settings (and the config file)"),

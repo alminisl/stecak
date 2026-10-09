@@ -26,6 +26,14 @@ pub struct Config {
     pub check_for_updates: bool,
     /// Treat macOS Option key as Alt (sends ESC-prefixed sequences).
     pub option_as_alt: bool,
+    /// Reopen the previous tabs, splits and folders at launch.
+    pub restore_session: bool,
+    /// Let zsh report where each command starts and ends (OSC 133), for "Explain last error".
+    pub shell_integration: bool,
+    /// Opens `file:line` links (⌘-click). Empty = VS Code, Cursor or Zed if installed, else
+    /// the default app. `{file}`, `{line}` and `{col}` are filled in, e.g. "nvim +{line} {file}";
+    /// terminal editors (vim, nvim, hx, nano, micro…) open in a new tab.
+    pub editor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -142,11 +150,13 @@ pub struct AgentConfig {
     pub command: String,
     /// macOS notification when an agent rings the bell or notifies while you're elsewhere.
     pub notifications: bool,
+    /// One-shot command for "Ask AI" (⌘I); the prompt is appended as its last argument.
+    pub ask_command: String,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { command: "claude".into(), notifications: true }
+        Self { command: "claude".into(), notifications: true, ask_command: "claude -p --model haiku".into() }
     }
 }
 
@@ -172,6 +182,9 @@ impl Default for Config {
             welcome: true,
             check_for_updates: true,
             option_as_alt: true,
+            restore_session: true,
+            shell_integration: true,
+            editor: String::new(),
         }
     }
 }

@@ -87,6 +87,8 @@ pub struct Text {
     faces: Vec<Option<Face>>,
     /// Whether the configured Bosančica font is installed.
     pub has_bosancica: bool,
+    /// Installed monospace families, for the command palette's font list (a few KB).
+    pub monospace_families: Vec<String>,
     bosancica_scale: f32,
     bosancica_embolden: f32,
     fallbacks: Vec<FontSource>,
@@ -182,6 +184,11 @@ impl Text {
         let bosancica = bosancica_source(&db, &cfg.bosancica.font).and_then(|s| Face::open(&s));
         let has_bosancica = bosancica.is_some();
         let system_fonts: Vec<FontSource> = db.faces().filter_map(|f| source_of(&db, f.id)).collect();
+        let mut monospace_families: Vec<String> = db.faces().filter(|f| f.monospaced).filter_map(|f| f.families.first().map(|(n, _)| n.clone())).collect();
+        // Names starting with '.' are macOS-internal (.SF NS Mono…).
+        monospace_families.retain(|n| !n.starts_with('.'));
+        monospace_families.sort_by_key(|n| n.to_lowercase());
+        monospace_families.dedup();
         drop(db);
 
         let px = (cfg.font.size * scale).round();
@@ -210,6 +217,7 @@ impl Text {
         Text {
             faces,
             has_bosancica,
+            monospace_families,
             bosancica_scale,
             bosancica_embolden,
             fallbacks,

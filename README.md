@@ -125,6 +125,8 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | K | clear scrollback |
 | = / - / 0 | font size bigger / smaller / reset |
 | Shift+A / Shift+S | agent split / session browser |
+| I / Shift+E / Shift+L | ask AI for a command / explain last error / send selection to agent (Ctrl+Shift+I / X / L elsewhere) |
+| Shift+P | command palette |
 | Shift+B | Bosančica mode on/off |
 | , | settings page (⚙ in the tab bar too) |
 | / | keyboard shortcut legend |
@@ -156,12 +158,25 @@ The image is decoded on a worker thread and resized to the window, so a 4K wallp
 - **Agent split:** **Cmd+Shift+A** opens your agent in a split, in the current folder (`agent.command`, default `claude`).
 - **Session browser:** **Cmd+Shift+S** lists your saved Claude Code and Codex sessions, newest first, with ● on live ones. Type to search. Enter or a click resumes a session in a new tab, in its folder.
 - **No flicker:** agent UIs redraw constantly, and synchronized output (mode 2026) is supported.
+- **Ask AI for a command (⌘I):** describe what you want ("find files over 100 MB here") and the command is typed at your prompt for you to check. It's never run for you. This uses `claude -p` (`agent.ask_command`), so there's no API key to set up.
+- **Explain last error (⌘⇧E):** the last command, its exit code and its output go to your agent, which explains what went wrong. If no agent is open in the tab, one opens in a split. This needs zsh shell integration (on by default). Without it, the agent gets what's on screen instead.
+- **Send selection to agent (⌘⇧L):** pastes the selected text (or, with nothing selected, the last command and its output) into the agent as context, so you can type your question after it.
+- **Sessions come back:** when you close the window, each pane's folder is saved, along with the exact Claude Code conversation running in it. At the next launch, every tab and split reopens with `claude --resume <that session>`. Codex panes resume their latest conversation in that folder. When you quit the agent, you're left at a shell.
 
 ```yaml
 agent:
-  command: claude       # or "codex"
+  command: claude                        # or "codex"
   notifications: true
+  ask_command: claude -p --model haiku   # one-shot command for ⌘I; the prompt is appended
+restore_session: true    # reopen tabs, splits, folders and agent sessions at launch
+shell_integration: true  # zsh reports each command and its exit status (OSC 133)
+editor: ""               # for ⌘-click on file:line; empty = VS Code / Cursor / Zed / default app
+                         # e.g. "nvim +{line} {file}" (terminal editors open in a new tab)
 ```
+
+**Command palette (⌘⇧P):** every action, every theme and every installed monospace font, all in one searchable list.
+
+**Clickable file paths:** ⌘-click `src/main.rs:120:5` in compiler or agent output to open it at that line in your editor.
 
 ## Bosančica mode
 

@@ -1,4 +1,4 @@
-//! Native macOS menu bar (Stećak / File / Edit / View / Window / Help), like iTerm2's.
+//! Native macOS menu bar (Stećak / File / Edit / View / AI / Window / Help), like iTerm2's.
 //! Items carry the same shortcuts as the keyboard handler; macOS routes a shortcut to the
 //! menu first, so each item just forwards its id to the event loop as `UserEvent::Menu`.
 
@@ -53,10 +53,6 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) -> Menu {
             &item("new-tab", "New Tab", Some("CmdOrCtrl+T")),
             &item("split-right", "Split Right", Some("CmdOrCtrl+D")),
             &item("split-down", "Split Down", Some("CmdOrCtrl+Shift+D")),
-            &item("agent", "Open Agent in Split", Some("CmdOrCtrl+Shift+A")),
-            &sep(),
-            &item("sessions", "Sessions…", Some("CmdOrCtrl+Shift+S")),
-            &sep(),
             &item("close", "Close", Some("CmdOrCtrl+W")),
         ],
     )
@@ -87,9 +83,24 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) -> Menu {
             &item("bosancica", "Bosančica Mode", Some("CmdOrCtrl+Shift+B")),
             &sep(),
             &PredefinedMenuItem::fullscreen(None),
+            &sep(),
+            &item("palette", "Command Palette…", Some("CmdOrCtrl+Shift+P")),
         ],
     )
     .expect("view menu");
+    let ai = Submenu::with_items(
+        "AI",
+        true,
+        &[
+            &item("ask-ai", "Ask AI for a Command…", Some("CmdOrCtrl+I")),
+            &item("explain-error", "Explain Last Error", Some("CmdOrCtrl+Shift+E")),
+            &item("send-to-agent", "Send Selection to Agent", Some("CmdOrCtrl+Shift+L")),
+            &sep(),
+            &item("agent", "Open Agent in Split", Some("CmdOrCtrl+Shift+A")),
+            &item("sessions", "Sessions…", Some("CmdOrCtrl+Shift+S")),
+        ],
+    )
+    .expect("ai menu");
     let window = Submenu::with_items(
         "Window",
         true,
@@ -117,7 +128,7 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) -> Menu {
         ],
     )
     .expect("help menu");
-    let menu = Menu::with_items(&[&app, &file, &edit, &view, &window, &help]).expect("menu bar");
+    let menu = Menu::with_items(&[&app, &file, &edit, &view, &ai, &window, &help]).expect("menu bar");
     menu.init_for_nsapp();
     window.set_as_windows_menu_for_nsapp();
     help.set_as_help_menu_for_nsapp();

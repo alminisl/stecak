@@ -7,6 +7,7 @@
 //! - swash: font shaping (ligatures) and rasterization
 
 mod agents;
+mod ai;
 mod bgimage;
 mod browser;
 mod config;
@@ -16,8 +17,10 @@ mod layout;
 #[cfg(target_os = "macos")]
 mod menu;
 mod mouse;
+mod palette;
 mod pane;
 mod renderer;
+mod restore;
 mod search;
 mod settings;
 mod text;
@@ -67,6 +70,18 @@ struct Tab {
     focus: PaneId,
 }
 
+/// The "Ask AI" bar (⌘I) at the bottom of a pane.
+#[derive(Default)]
+struct Ask {
+    open: bool,
+    pane: PaneId,
+    query: String,
+    /// Waiting for the model; replies from older requests (lower generation) are ignored.
+    busy: bool,
+    generation: u64,
+    error: Option<String>,
+}
+
 /// Mouse button state while dragging a selection, reporting to an app, or resizing a split.
 #[derive(Clone)]
 enum Drag {
@@ -107,7 +122,7 @@ struct App {
     mouse: (f32, f32),
     drag: Option<Drag>,
     last_click: Option<(Instant, PaneId, Point, u8)>,
-    hover_url: Option<(PaneId, i32, usize, usize, String)>,
+    hover_url: Option<(PaneId, i32, usize, usize, mouse::Link)>,
     scroll_accum: f64,
     cursor_icon: CursorIcon,
     /// IME composition in progress (e.g. pinyin, or a dead key like ´ before e).
@@ -121,6 +136,11 @@ struct App {
     sessions: browser::Browser,
     /// Where the browser's rows were last drawn: (panel rect, first row y, row height, first index).
     sessions_layout: Option<(Rect, f32, f32, usize)>,
+    palette: palette::Palette,
+    palette_layout: Option<(Rect, f32, f32, usize)>,
+    ask: Ask,
+    /// Text waiting for an agent that's still starting in a new split: (text, press Enter).
+    pending_agent: HashMap<PaneId, (String, bool)>,
     /// Panes that rang the bell / notified while you were looking elsewhere.
     attention: HashSet<PaneId>,
     last_notified: HashMap<PaneId, Instant>,
@@ -188,6 +208,10 @@ impl App {
             settings: Settings::default(),
             sessions: browser::Browser::default(),
             sessions_layout: None,
+            palette: palette::Palette::default(),
+            palette_layout: None,
+            ask: Ask::default(),
+            pending_agent: HashMap::new(),
             attention: HashSet::new(),
             last_notified: HashMap::new(),
             update: None,
@@ -434,13 +458,262 @@ impl App {
     }
 
     fn paste_text(&self, text: &str) {
-        let Some(pane) = self.focused_pane() else { return };
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let bracketed = pane.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
-        if bracketed {
-            pane.write(format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).as_bytes());
+        if let Some(pane) = self.focused_pane() {
+            paste_into(pane, text);
+        }
+    }
+
+    // ---- AI ----------------------------------------------------------------------------
+
+    fn is_agent_pane(&self, id: PaneId) -> bool {
+        self.panes.get(&id).and_then(|p| p.foreground_process()).is_some_and(|n| agents::is_agent(&n))
+    }
+
+    /// The pane in the active tab running an agent (the focused one first), if any.
+    fn agent_pane_in_tab(&self) -> Option<PaneId> {
+        let t = self.tabs.get(self.active)?;
+        let mut ids = vec![];
+        t.root.leaves(&mut ids);
+        ids.sort_by_key(|&id| id != t.focus);
+        ids.into_iter().find(|&id| self.is_agent_pane(id))
+    }
+
+    /// Paste `text` into the tab's agent (opening one in a split if there's none), and press
+    /// Enter if `submit`.
+    fn send_to_agent(&mut self, text: String, submit: bool) {
+        if let Some(id) = self.agent_pane_in_tab() {
+            self.tabs[self.active].focus = id;
+            self.deliver(id, &text, submit);
         } else {
-            pane.write(text.as_bytes());
+            let before = self.focused_id();
+            let cmd = self.config.agent.command.clone();
+            self.split(Dir::Horizontal, Some(&cmd));
+            let Some(id) = self.focused_id().filter(|&id| Some(id) != before) else { return };
+            self.pending_agent.insert(id, (text, submit));
+            if let Some(p) = self.panes.get(&id) {
+                wait_until_settled(id, p.last_output.clone(), self.proxy.clone());
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn deliver(&mut self, id: PaneId, text: &str, submit: bool) {
+        let Some(p) = self.panes.get(&id) else { return };
+        paste_into(p, text);
+        if submit {
+            // A separate keystroke a moment later, so the agent sees a paste and then Enter.
+            let proxy = self.proxy.clone();
+            let _ = std::thread::Builder::new().stack_size(64 * 1024).spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = proxy.send_event(UserEvent::Submit(id));
+            });
+        }
+    }
+
+    /// The pane whose last command to explain: the focused one, unless that's the agent.
+    fn shell_pane_in_tab(&self) -> Option<PaneId> {
+        let t = self.tabs.get(self.active)?;
+        if !self.is_agent_pane(t.focus) {
+            return Some(t.focus);
+        }
+        let mut ids = vec![];
+        t.root.leaves(&mut ids);
+        ids.into_iter().find(|&id| !self.is_agent_pane(id))
+    }
+
+    fn explain_last_error(&mut self) {
+        let Some(p) = self.shell_pane_in_tab().and_then(|id| self.panes.get(&id)) else { return };
+        let record = p.last_command.lock().clone();
+        let screen = if record.is_none() { mouse::screen_text(&p.term.lock()) } else { String::new() };
+        let prompt = ai::explain_prompt(record.as_ref(), &screen, p.cwd().as_deref());
+        self.send_to_agent(prompt, true);
+    }
+
+    /// The selection as context for the agent; with no selection, the last command and its output.
+    fn send_selection(&mut self) {
+        let Some(p) = self.focused_pane() else { return };
+        let selection = p.term.lock().selection_to_string().filter(|s| !s.trim().is_empty());
+        let text = match selection {
+            Some(s) => s,
+            None => match p.last_command.lock().clone() {
+                Some(r) => format!("$ {}\n{}", r.command, ai::tail(&ai::plain_text(&r.output), 80, 6000)),
+                None => return,
+            },
+        };
+        let snippet = ai::context_snippet(&text, p.cwd().as_deref());
+        p.term.lock().selection = None;
+        self.send_to_agent(snippet, false);
+    }
+
+    fn open_ask(&mut self) {
+        if let Some(id) = self.focused_id() {
+            self.ask = Ask { open: true, pane: id, generation: self.ask.generation + 1, ..Default::default() };
+            self.mark_dirty();
+        }
+    }
+
+    /// Keys while the Ask AI bar is open. Returns true if consumed.
+    fn ask_key(&mut self, event: &KeyEvent) -> bool {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.ask.open = false;
+                self.ask.generation += 1;
+            }
+            _ if self.ask.busy => {}
+            Key::Named(NamedKey::Enter) => {
+                let task = self.ask.query.trim().to_string();
+                if !task.is_empty() {
+                    self.ask.busy = true;
+                    self.ask.error = None;
+                    let cwd = self.panes.get(&self.ask.pane).and_then(|p| p.cwd());
+                    ai::ask_async(&self.config.agent.ask_command, &task, cwd, self.ask.pane, self.ask.generation, self.proxy.clone());
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                self.ask.query.pop();
+                self.ask.error = None;
+            }
+            _ => match &event.text {
+                Some(t) if !t.chars().any(char::is_control) => self.ask.query.push_str(t),
+                _ => return false,
+            },
+        }
+        self.mark_dirty();
+        true
+    }
+
+    fn on_ai_reply(&mut self, pane: PaneId, generation: u64, reply: Result<String, String>) {
+        if !self.ask.open || generation != self.ask.generation {
+            return;
+        }
+        self.ask.busy = false;
+        match reply {
+            Ok(text) => {
+                let Some(p) = self.panes.get(&pane) else { return };
+                let bracketed = p.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+                let command = ai::clean_command(&text, bracketed);
+                if command.is_empty() {
+                    self.ask.error = Some("The reply had no command in it".into());
+                } else {
+                    paste_into(p, &command);
+                    self.ask.open = false;
+                }
+            }
+            Err(e) => self.ask.error = Some(e),
+        }
+        self.mark_dirty();
+    }
+
+    // ---- command palette -----------------------------------------------------------------
+
+    fn open_palette(&mut self) {
+        let fonts = self.r().monospace_families().to_vec();
+        self.palette.open(&fonts);
+        self.mark_dirty();
+    }
+
+    fn palette_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
+        use palette::Key as K;
+        let key = match &event.logical_key {
+            Key::Named(NamedKey::ArrowUp) => K::Up,
+            Key::Named(NamedKey::ArrowDown) => K::Down,
+            Key::Named(NamedKey::Enter) => K::Enter,
+            Key::Named(NamedKey::Escape) => K::Escape,
+            Key::Named(NamedKey::Backspace) => K::Backspace,
+            _ => match &event.text {
+                Some(t) if !t.chars().any(char::is_control) => K::Text(t.as_str()),
+                _ => return false,
+            },
+        };
+        if let Some(id) = self.palette.handle(key) {
+            self.menu_action(&id, event_loop);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    fn open_link(&mut self, link: mouse::Link) {
+        match link {
+            mouse::Link::Url(url) => mouse::open_url(&url),
+            mouse::Link::File(path, line, col) => {
+                if let Some(cmd) = mouse::open_file(&path, line, col, &self.config.editor) {
+                    self.open_tab(Some(&cmd), path.parent().map(PathBuf::from));
+                }
+            }
+        }
+    }
+
+    // ---- session restore -----------------------------------------------------------------
+
+    /// Scripted runs restore only with their own config dir, never touching your session.
+    fn restoring_enabled(&self) -> bool {
+        let demo = std::env::var_os("STECAK_DEMO").is_some() && std::env::var_os("STECAK_CONFIG").is_none();
+        self.config.restore_session && self.cli_shell.is_none() && !demo
+    }
+
+    fn config_dir(&self) -> &std::path::Path {
+        self.config_path.parent().unwrap_or(std::path::Path::new("."))
+    }
+
+    fn save_session(&self) {
+        if !self.restoring_enabled() {
+            return;
+        }
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let mut ids = vec![];
+                t.root.leaves(&mut ids);
+                restore::SavedTab { root: self.saved_node(&t.root), focus: ids.iter().position(|&id| id == t.focus).unwrap_or(0) }
+            })
+            .collect();
+        restore::save(&restore::Saved { active: self.active, tabs }, self.config_dir());
+    }
+
+    fn saved_node(&self, node: &Node) -> restore::SavedNode {
+        match node {
+            Node::Leaf(id) => {
+                let Some(p) = self.panes.get(id) else { return restore::SavedNode::Pane { cwd: None, command: None } };
+                let command = p.foreground_process().and_then(|name| {
+                    let session = p.foreground_pid().and_then(agents::claude_session_id);
+                    restore::resume_command(&name, session.as_deref())
+                });
+                restore::SavedNode::Pane { cwd: p.cwd(), command }
+            }
+            Node::Split { dir, ratio, a, b } => {
+                restore::SavedNode::Split { horizontal: *dir == Dir::Horizontal, ratio: *ratio, a: Box::new(self.saved_node(a)), b: Box::new(self.saved_node(b)) }
+            }
+        }
+    }
+
+    /// Reopen the saved tabs. Returns false if there was nothing to restore.
+    fn restore_session(&mut self) -> bool {
+        let Some(saved) = restore::load(self.config_dir()) else { return false };
+        for t in saved.tabs {
+            if let Some(root) = self.restored_node(t.root) {
+                let mut ids = vec![];
+                root.leaves(&mut ids);
+                let focus = ids.get(t.focus).copied().unwrap_or(ids[0]);
+                self.tabs.push(Tab { root, focus });
+            }
+        }
+        if self.tabs.is_empty() {
+            return false;
+        }
+        self.active = saved.active.min(self.tabs.len() - 1);
+        self.resize_all();
+        true
+    }
+
+    fn restored_node(&mut self, node: restore::SavedNode) -> Option<Node> {
+        match node {
+            restore::SavedNode::Pane { cwd, command } => self.spawn_pane(command.as_deref(), cwd.or_else(dirs::home_dir)).map(Node::Leaf),
+            restore::SavedNode::Split { horizontal, ratio, a, b } => match (self.restored_node(*a), self.restored_node(*b)) {
+                (Some(a), Some(b)) => Some(Node::Split { dir: restore::SavedNode::dir(horizontal), ratio: ratio.clamp(0.1, 0.9), a: Box::new(a), b: Box::new(b) }),
+                (Some(n), None) | (None, Some(n)) => Some(n),
+                (None, None) => None,
+            },
         }
     }
 
@@ -473,6 +746,10 @@ impl App {
                 self.sessions.open();
                 self.mark_dirty();
             }
+            Action::Palette => self.open_palette(),
+            Action::AskAi => self.open_ask(),
+            Action::ExplainError => self.explain_last_error(),
+            Action::SendToAgent => self.send_selection(),
             Action::NextPane => self.cycle_pane(1),
             Action::PrevPane => self.cycle_pane(-1),
             Action::Shortcuts => {
@@ -562,7 +839,22 @@ impl App {
             "next-pane" => Action::NextPane,
             "prev-pane" => Action::PrevPane,
             "shortcuts" => Action::Shortcuts,
-            _ => return,
+            "palette" => Action::Palette,
+            "ask-ai" => Action::AskAi,
+            "explain-error" => Action::ExplainError,
+            "send-to-agent" => Action::SendToAgent,
+            _ => {
+                let mut cfg = self.config.clone();
+                if let Some(preset) = id.strip_prefix("theme:").and_then(|i| i.parse::<usize>().ok()).and_then(|i| theme::PRESETS.get(i)) {
+                    preset.apply(&mut cfg.colors);
+                } else if let Some(family) = id.strip_prefix("font:") {
+                    cfg.font.family.retain(|f| f != family);
+                    cfg.font.family.insert(0, family.to_string());
+                } else {
+                    return;
+                }
+                return self.apply_and_save(cfg);
+            }
         };
         self.handle_action(action, event_loop);
     }
@@ -737,6 +1029,46 @@ impl App {
                 self.sessions.query = arg.to_string();
             }
             "help" => self.help_open = true,
+            "palette" => {
+                self.open_palette();
+                self.palette.query = arg.to_string();
+            }
+            "ask" => {
+                self.open_ask();
+                self.ask.query = arg.to_string();
+            }
+            "ask-go" => {
+                self.ask.busy = true;
+                let cwd = self.panes.get(&self.ask.pane).and_then(|p| p.cwd());
+                ai::ask_async(&self.config.agent.ask_command, &self.ask.query, cwd, self.ask.pane, self.ask.generation, self.proxy.clone());
+            }
+            "explain" => self.explain_last_error(),
+            "quit" => {
+                self.save_session();
+                event_loop.exit();
+            }
+            // Log what's on screen, for scripted tests that can't take screenshots.
+            "dump" => {
+                for (i, t) in self.tabs.iter().enumerate() {
+                    let mut ids = vec![];
+                    t.root.leaves(&mut ids);
+                    for id in ids {
+                        if let Some(p) = self.panes.get(&id) {
+                            log::info!("dump tab {i} pane {id}:\n{}", mouse::screen_text(&p.term.lock()));
+                        }
+                    }
+                }
+                if self.palette.open {
+                    log::info!("dump palette: {:?}", self.palette.visible().iter().take(5).map(|e| &e.label).collect::<Vec<_>>());
+                }
+                if self.settings.open {
+                    log::info!("dump settings: {:?}", self.settings.rows(&self.config).take(3).map(|(l, v, _)| format!("{l}={v}")).collect::<Vec<_>>());
+                }
+                if self.ask.open {
+                    log::info!("dump ask: busy={} error={:?}", self.ask.busy, self.ask.error);
+                }
+            }
+            "send" => self.send_selection(),
             "check-update" => update::check_async(self.proxy.clone(), true),
             "update-go" => self.update_action(true, event_loop),
             "update" => self.update = Some(UpdateUi::Available(update::Release { version: arg.to_string(), page: String::new(), dmg: None })),
@@ -803,10 +1135,13 @@ impl App {
         if self.open_link_modifier() {
             if let Some((g, col, row, _)) = self.hit() {
                 if let Some(p) = self.panes.get(&g.id) {
+                    let cwd = p.cwd();
                     let term = p.term.lock();
                     let line = Line(row as i32 - term.grid().display_offset() as i32);
                     if let Some((a, b, url)) = mouse::hyperlink_at(&term, line, col).or_else(|| mouse::url_at(&term, line, col)) {
-                        hover = Some((g.id, line.0, a, b, url));
+                        hover = Some((g.id, line.0, a, b, mouse::Link::Url(url)));
+                    } else if let Some((a, b, link)) = mouse::path_at(&term, line, col, cwd.as_deref()) {
+                        hover = Some((g.id, line.0, a, b, link));
                     }
                 }
             }
@@ -874,6 +1209,20 @@ impl App {
             self.mark_dirty();
             return;
         }
+        if self.palette.open {
+            match self.palette_layout {
+                Some((panel, y0, lh, first)) if panel.contains(x, y) => {
+                    if y >= y0 {
+                        if let Some(id) = self.palette.pick(first + ((y - y0) / lh) as usize) {
+                            self.menu_action(&id, event_loop);
+                        }
+                    }
+                }
+                _ => self.palette.open = false,
+            }
+            self.mark_dirty();
+            return;
+        }
         if self.settings.open {
             self.settings.open = false;
             self.mark_dirty();
@@ -897,8 +1246,8 @@ impl App {
             self.mark_dirty();
         }
         if button == MouseButton::Left {
-            if let Some((_, _, _, _, url)) = self.hover_url.clone().filter(|h| h.0 == g.id) {
-                mouse::open_url(&url);
+            if let Some((_, _, _, _, link)) = self.hover_url.clone().filter(|h| h.0 == g.id) {
+                self.open_link(link);
                 return;
             }
         }
@@ -1139,7 +1488,7 @@ impl App {
                 (working, waiting)
             })
             .collect();
-        self.animating = statuses.iter().any(|s| s.0);
+        self.animating = statuses.iter().any(|s| s.0) || self.ask.busy;
 
         // Frame skipping: only panes on screen matter. Output in background tabs (or nothing
         // at all) costs no CPU rendering and no GPU work.
@@ -1199,6 +1548,9 @@ impl App {
             }
             if searching {
                 draw_search_bar(r, theme, search, g);
+            }
+            if self.ask.open && self.ask.pane == g.id {
+                draw_ask_bar(r, theme, &self.ask, g, now, &config.agent.ask_command);
             }
         }
         // IME: show the text being composed at the cursor, and tell the OS where the cursor is
@@ -1297,11 +1649,18 @@ impl App {
         if self.sessions.open {
             self.sessions_layout = Some(draw_sessions(r, theme, &self.sessions));
         }
+        self.palette_layout = None;
+        if self.palette.open {
+            self.palette_layout = Some(draw_palette(r, theme, &self.palette));
+        }
         if self.help_open {
             draw_shortcuts(r, theme);
         }
         if self.settings.open {
             self.settings.bosancica_font_ok = r.has_bosancica();
+            if self.settings.fonts.is_empty() {
+                self.settings.fonts = r.monospace_families().to_vec();
+            }
             draw_settings(r, theme, &self.settings, config);
         }
 
@@ -1496,6 +1855,96 @@ fn draw_sessions(r: &mut Renderer, theme: &Theme, b: &browser::Browser) -> (Rect
     (Rect { x, y, w, h }, y0, lh, first)
 }
 
+/// Paste into a pane the way ⌘V does (bracketed when the app asked for it, so a shell
+/// never runs pasted text by itself).
+fn paste_into(pane: &Pane, text: &str) {
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    let bracketed = pane.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+    if bracketed {
+        pane.write(format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).as_bytes());
+    } else {
+        pane.write(text.as_bytes());
+    }
+}
+
+/// Tell the UI once an agent that just started has drawn its UI and gone quiet (ready for
+/// input), or after 20 s regardless.
+fn wait_until_settled(id: PaneId, last_output: Arc<AtomicU64>, proxy: EventLoopProxy<UserEvent>) {
+    let _ = std::thread::Builder::new().name("agent-wait".into()).stack_size(64 * 1024).spawn(move || {
+        let start = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let last = last_output.load(Ordering::Acquire);
+            let quiet = last > 0 && pane::now_ms().saturating_sub(last) > 1200 && start.elapsed() > Duration::from_secs(2);
+            if quiet || start.elapsed() > Duration::from_secs(20) {
+                let _ = proxy.send_event(UserEvent::AgentReady(id));
+                return;
+            }
+        }
+    });
+}
+
+/// The Ask AI bar at the bottom of the pane.
+fn draw_ask_bar(r: &mut Renderer, theme: &Theme, ask: &Ask, g: &PaneGeom, now: u64, command: &str) {
+    let (cw, ch) = r.cell();
+    let h = (ch * 1.5).round();
+    let y = g.rect.y + g.rect.h - h;
+    let amber = theme.palette[3];
+    r.rect(g.rect.x, y, g.rect.w, h, rgba(theme.tab_bar, 0.97));
+    r.rect(g.rect.x, y, g.rect.w, r.scale.max(1.0), rgba(amber, 1.0));
+    let ty = y + ((h - ch) / 2.0).round();
+    let (x0, x1) = (g.rect.x + cw, g.rect.x + g.rect.w - cw);
+    const ROSETTE: [&str; 4] = ["✻", "✼", "✽", "❋"];
+    let icon = if ask.busy { ROSETTE[(now / 160 % 4) as usize] } else { "✻" };
+    r.text(icon, x0, ty, x1, rgba(amber, 1.0));
+    let text = if ask.query.is_empty() && !ask.busy { "Ask AI: describe a command…".to_string() } else { format!("Ask AI: {}{}", ask.query, if ask.busy { "" } else { "▏" }) };
+    let end = r.text_end(&text, x0 + 2.0 * cw, x1);
+    r.text(&text, x0 + 2.0 * cw, ty, x1, rgba(theme.fg, if ask.query.is_empty() && !ask.busy { 0.5 } else { 1.0 }));
+    let program = command.split_whitespace().next().unwrap_or("agent");
+    let (status, color, alpha) = match &ask.error {
+        Some(e) => (e.clone(), theme.palette[1], 0.9),
+        None if ask.busy => (format!("asking {program}… · esc cancel"), theme.fg, 0.55),
+        None => ("⏎ type it at the prompt (not run) · esc".into(), theme.fg, 0.55),
+    };
+    r.text(&status, end + 2.0 * cw, ty, x1, rgba(color, alpha));
+}
+
+/// The command palette. Returns (panel rect, first row y, row height, first index).
+fn draw_palette(r: &mut Renderer, theme: &Theme, p: &palette::Palette) -> (Rect, f32, f32, usize) {
+    let (cw, ch) = r.cell();
+    let (win_w, win_h) = r.size();
+    let lh = (ch * 1.45).round();
+    let w = (cw * 72.0).min(win_w - 4.0 * cw);
+    let h = (win_h * 0.7).min(lh * 16.0);
+    let (x, y) = (((win_w - w) / 2.0).round(), (win_h * 0.12).round());
+    r.rect(0.0, 0.0, win_w, win_h, [0.0, 0.0, 0.0, 0.35]);
+    r.rect(x, y, w, h, rgba(theme.tab_bar, 0.98));
+    r.rect(x, y, w, r.scale.max(1.0), rgba(theme.palette[4], 1.0));
+    let pad = 2.0 * cw;
+    let dy = ((lh - ch) / 2.0).round();
+    let query = if p.query.is_empty() { "Type a command, theme or font…".to_string() } else { format!("{}▏", p.query) };
+    r.text("›", x + pad, y + dy + lh * 0.3, x + w, rgba(theme.palette[4], 1.0));
+    r.text(&query, x + pad + 2.0 * cw, y + dy + lh * 0.3, x + w - pad, rgba(theme.fg, if p.query.is_empty() { 0.5 } else { 1.0 }));
+    let items = p.visible();
+    let y0 = y + lh * 1.6;
+    let rows = (((y + h - lh * 0.3) - y0) / lh).floor().max(1.0) as usize;
+    let first = p.selected.saturating_sub(rows - 1);
+    if items.is_empty() {
+        r.text("No matches", x + pad, y0 + dy, x + w - pad, rgba(theme.fg, 0.5));
+    }
+    for (i, e) in items.iter().enumerate().skip(first).take(rows) {
+        let ry = y0 + (i - first) as f32 * lh;
+        let selected = i == p.selected;
+        if selected {
+            r.rect(x + cw, ry, w - 2.0 * cw, lh, rgba(theme.tab_active, 1.0));
+        }
+        let kx = x + w - pad - e.keys.chars().count() as f32 * cw;
+        r.text(&e.label, x + pad, ry + dy, kx - cw, rgba(theme.fg, if selected { 1.0 } else { 0.8 }));
+        r.text(e.keys, kx, ry + dy, x + w - pad, rgba(theme.palette[3], if selected { 1.0 } else { 0.7 }));
+    }
+    (Rect { x, y, w, h }, y0, lh, first)
+}
+
 /// Native notification. shortcut: shells out to osascript/notify-send instead of linking a
 /// notification framework; the macOS notification is attributed to Script Editor.
 fn desktop_notification(title: &str, body: &str) {
@@ -1562,6 +2011,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_session();
         self.flush_stats();
     }
 
@@ -1632,8 +2082,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         window.set_visible(true);
 
-        self.new_tab();
-        if self.config.welcome {
+        let restored = self.restoring_enabled() && self.restore_session();
+        if !restored {
+            self.new_tab();
+        }
+        if self.config.welcome && !restored {
             if let (Some(g), Some(id)) = (self.geometry(self.active).0.first(), self.focused_id()) {
                 let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 if let Some(p) = self.panes.get(&id) {
@@ -1697,6 +2150,18 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mark_dirty();
             }
             UserEvent::Demo(step) => self.demo_step(&step, event_loop),
+            UserEvent::AiReply(pane, generation, reply) => self.on_ai_reply(pane, generation, reply),
+            UserEvent::AgentReady(id) => {
+                if let Some((text, submit)) = self.pending_agent.remove(&id) {
+                    self.deliver(id, &text, submit);
+                }
+            }
+            UserEvent::Submit(id) => {
+                if let Some(p) = self.panes.get(&id) {
+                    p.write(b"\r");
+                }
+            }
+
             UserEvent::BackgroundImage(img) => {
                 self.renderer.as_mut().unwrap().set_background_image(img);
                 self.mark_dirty();
@@ -1706,7 +2171,10 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save_session();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
@@ -1757,6 +2225,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.sessions.open && !app_mod && self.sessions_key(&event) {
                     return;
                 }
+                if self.palette.open && !app_mod && self.palette_key(&event, event_loop) {
+                    return;
+                }
+                if self.ask.open && !app_mod && self.ask_key(&event) {
+                    return;
+                }
                 if self.settings.open && !app_mod && self.settings_key(&event) {
                     return;
                 }
@@ -1774,7 +2248,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit.clear();
-                if self.search.open {
+                if self.ask.open && !self.ask.busy {
+                    self.ask.query.push_str(&text);
+                    self.mark_dirty();
+                } else if self.search.open {
                     let q = format!("{}{text}", self.search.query);
                     if let Some(p) = self.panes.get(&self.search.pane) {
                         self.search.set_query(q, &mut p.term.lock());
