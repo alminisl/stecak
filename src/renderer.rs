@@ -567,14 +567,15 @@ impl Renderer {
     }
 
     /// Submit the frame. `clear` is the (non-premultiplied) window background color incl. alpha.
-    pub fn present(&mut self, clear: [f32; 4]) {
+    /// Returns false if no frame reached the screen (the caller must draw again).
+    pub fn present(&mut self, clear: [f32; 4]) -> bool {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.surface_cfg);
-                return;
+                return false;
             }
-            _ => return,
+            _ => return false,
         };
 
         if self.instances.len() > self.instance_cap {
@@ -613,5 +614,6 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
+        true
     }
 }

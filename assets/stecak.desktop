@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Stećak
+GenericName=Terminal
+Comment=A fast, lightweight GPU terminal emulator
+Exec=stecak
+Icon=stecak
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;terminal;
+StartupWMClass=stecak

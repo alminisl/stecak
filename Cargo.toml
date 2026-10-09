@@ -1,7 +1,13 @@
 [package]
-name = "lumen"
+name = "stecak"
 version = "0.1.0"
 edition = "2024"
+description = "A fast, lightweight GPU terminal emulator"
+license = "MIT"
+repository = "https://github.com/alminisl/ste-ak"
+readme = "README.md"
+keywords = ["terminal", "terminal-emulator", "gpu", "wgpu"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 winit = "0.30"

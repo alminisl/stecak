@@ -1,4 +1,4 @@
-//! Lumen: a lightweight GPU terminal emulator.
+//! Stećak: a lightweight GPU terminal emulator.
 //!
 //! - winit: cross-platform windowing (incl. transparent windows)
 //! - wgpu: GPU rendering via Metal / DX12 / Vulkan
@@ -59,7 +59,7 @@ enum Drag {
     Divider(Divider),
 }
 
-/// Frame-time statistics, logged every few seconds with LUMEN_STATS=1.
+/// Frame-time statistics, logged every few seconds with STECAK_STATS=1.
 #[derive(Default)]
 struct Stats {
     enabled: bool,
@@ -153,7 +153,7 @@ impl App {
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
             dirty: true,
-            stats: Stats { enabled: std::env::var_os("LUMEN_STATS").is_some(), ..Default::default() },
+            stats: Stats { enabled: std::env::var_os("STECAK_STATS").is_some(), ..Default::default() },
         }
     }
 
@@ -969,11 +969,16 @@ impl App {
         }
 
         let t1 = Instant::now();
-        r.present(clear);
+        if !r.present(clear) {
+            // The OS had no drawable for us (launch animation, resize, occlusion): this frame
+            // never reached the screen, so the next one must not be skipped.
+            self.mark_dirty();
+            return;
+        }
         self.dirty = false;
 
         if let (Some(w), Some(p)) = (&self.window, focus.and_then(|f| self.panes.get(&f))) {
-            w.set_title(&format!("{} — Lumen", p.display_title()));
+            w.set_title(&format!("{} — Stećak", p.display_title()));
         }
         self.record_stats(t1 - t0, t1.elapsed(), stats);
     }
@@ -1076,7 +1081,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("Lumen")
+            .with_title("Stećak")
             .with_transparent(true)
             .with_inner_size(winit::dpi::LogicalSize::new(900.0, 560.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
@@ -1107,9 +1112,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.new_tab();
         self.load_background();
 
-        // LUMEN_DEMO="split-h;find:foo;…" replays UI actions for automated visual tests,
+        // STECAK_DEMO="split-h;find:foo;…" replays UI actions for automated visual tests,
         // without synthesizing OS-level keystrokes.
-        if let Ok(script) = std::env::var("LUMEN_DEMO") {
+        if let Ok(script) = std::env::var("STECAK_DEMO") {
             let proxy = self.proxy.clone();
             let _ = std::thread::Builder::new().name("demo".into()).spawn(move || {
                 for step in script.split(';').map(str::trim).filter(|s| !s.is_empty()) {
@@ -1297,11 +1302,11 @@ fn watch_config(path: PathBuf, proxy: EventLoopProxy<UserEvent>) {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("lumen=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("stecak=info")).init();
 
     let config_path = config::find_config_path().unwrap_or_else(config::default_config_path);
     let config = config::load();
-    // `lumen -e <program> [args…]` runs a command instead of the login shell.
+    // `stecak -e <program> [args…]` runs a command instead of the login shell.
     let args: Vec<String> = std::env::args().collect();
     let cli_shell = args.iter().position(|a| a == "-e").and_then(|i| {
         let program = args.get(i + 1)?;

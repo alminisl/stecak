@@ -1,4 +1,4 @@
-# Lumen config: copy to ~/.config/lumen/config.yaml (JSON works too). Changes apply on save.
+# Stećak config: copy to ~/.config/stecak/config.yaml (JSON works too). Changes apply on save.
 
 font:
   family: ["JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Menlo"]   # first installed wins
