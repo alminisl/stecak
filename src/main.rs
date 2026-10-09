@@ -116,6 +116,10 @@ struct App {
     update_buttons: Option<(Rect, Rect)>,
     /// Keyboard shortcut legend (⌘/) is showing.
     help_open: bool,
+    /// Tab under the mouse (shows its close ×).
+    hover_tab: Option<usize>,
+    /// The previous frame was a redraw forced by a glyph-atlas reset.
+    atlas_retry: bool,
     /// An agent is working in some tab: keep redrawing the tab animation.
     animating: bool,
     bg_gen: Arc<AtomicU64>,
@@ -173,6 +177,8 @@ impl App {
             update: None,
             update_buttons: None,
             help_open: false,
+            atlas_retry: false,
+            hover_tab: None,
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
@@ -900,6 +906,17 @@ impl App {
 
     fn on_motion(&mut self) {
         self.update_hover();
+        // Redraw only when the hovered tab changes (it shows a close ×).
+        let (x, y) = self.mouse;
+        let hover_tab = (y >= self.titlebar_h() && y < self.tab_bar_h()).then(|| {
+            let strip = self.tab_bar_h() - self.titlebar_h();
+            let tab_w = ((self.r().size().0 - strip) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
+            (x / tab_w) as usize
+        });
+        if hover_tab != self.hover_tab {
+            self.hover_tab = hover_tab;
+            self.mark_dirty();
+        }
         match self.drag.clone() {
             Some(Drag::Divider(d)) => {
                 let (x, y) = self.mouse;
@@ -948,7 +965,9 @@ impl App {
         let tab_w = ((win_w - plus_w) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
         let idx = (x / tab_w) as usize;
         if idx < self.tabs.len() {
-            if self.modifiers.alt_key() {
+            // The × sits in the last two cells of the tab.
+            let on_close = x >= (idx as f32 + 1.0) * tab_w - 2.5 * self.r().cell().0;
+            if self.modifiers.alt_key() || on_close {
                 let mut ids = vec![];
                 self.tabs[idx].root.leaves(&mut ids);
                 for id in ids {
@@ -1009,6 +1028,7 @@ impl App {
 
     fn draw(&mut self) {
         let t0 = Instant::now();
+        let atlas_gen = self.r().atlas_gen();
         // Output arriving from now on needs another frame.
         self.wakeup_pending.store(false, Ordering::Release);
         let (geoms, dividers) = self.geometry(self.active);
@@ -1169,7 +1189,13 @@ impl App {
                         r.rect(a, tab_bar_h - 2.0 * r.scale, b - a, 2.0 * r.scale, amber);
                     }
                 }
-                r.text(&label, lx, text_y, x + tab_w - cw, rgba(theme.fg, if active { 1.0 } else { 0.55 }));
+                let hovered = self.mouse.1 >= title_h && self.mouse.1 < tab_bar_h && self.mouse.0 >= x && self.mouse.0 < x + tab_w;
+                let show_close = active || hovered;
+                let label_end = if show_close { x + tab_w - 3.0 * cw } else { x + tab_w - cw };
+                r.text(&label, lx, text_y, label_end, rgba(theme.fg, if active { 1.0 } else { 0.55 }));
+                if show_close {
+                    r.text("×", x + tab_w - 2.0 * cw, text_y, x + tab_w, rgba(theme.fg, if hovered { 0.8 } else { 0.45 }));
+                }
             }
             let plus_x = tab_w * tabs.len() as f32;
             r.text("+", plus_x + (plus_w - cw) / 2.0, text_y, plus_x + plus_w, rgba(theme.fg, 0.7));
@@ -1191,13 +1217,26 @@ impl App {
         }
 
         let t1 = Instant::now();
+        // The glyph atlas filled up and was reset mid-frame: glyphs placed before the reset (and
+        // cached rows) point at stale atlas slots. Redraw everything once more right away, or
+        // wrong/missing letters can stay on screen until the next output.
+        let atlas_reset = r.atlas_gen() != atlas_gen;
         if !r.present(clear) {
             // The OS had no drawable for us (launch animation, resize, occlusion): this frame
-            // never reached the screen, so the next one must not be skipped.
-            self.mark_dirty();
+            // never reached the screen, so the next one must not be skipped. Don't request a
+            // redraw here: if presenting keeps failing that would spin at 100% CPU; the next
+            // event (focus, resize, output, unocclusion) draws it.
+            self.dirty = true;
             return;
         }
         self.dirty = false;
+        // Retry once only: if a single screen needs more glyphs than the atlas holds, every
+        // frame resets it and an unconditional retry would redraw forever.
+        if atlas_reset && !self.atlas_retry {
+            log::debug!("glyph atlas reset; redrawing");
+            self.mark_dirty();
+        }
+        self.atlas_retry = atlas_reset;
 
         if let (Some(w), Some(p)) = (&self.window, focus.and_then(|f| self.panes.get(&f))) {
             w.set_title(&format!("{} — Stećak", p.display_title()));

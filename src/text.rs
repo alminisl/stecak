@@ -303,8 +303,20 @@ impl Text {
             let px = self.face_px(face);
             let mut shaper = self.shape_ctx.builder(font).size(px).features(features.iter().copied()).build();
             shaper.add_str(&s[start_byte..end_byte]);
+            let charmap = font.charmap();
             shaper.shape_with(|cluster| {
-                let col = byte_col[start_byte + cluster.source.start as usize];
+                let (a, b) = (start_byte + cluster.source.start as usize, start_byte + cluster.source.end as usize);
+                let chars: Vec<(usize, char)> = s[a..b].char_indices().map(|(i, c)| (a + i, c)).collect();
+                if cluster.glyphs.len() < chars.len() {
+                    // A many-to-one ligature (fi, fl, ffi…): one glyph can't fill several grid
+                    // cells, so it would leave a gap. Draw each character in its own cell instead.
+                    // Programming ligatures (`->`, `!=`) keep one glyph per cell and pass through.
+                    for (byte, c) in chars {
+                        out.push(Shaped { face, glyph: charmap.map(c), col: byte_col[byte], x: 0.0, y: 0.0 });
+                    }
+                    return;
+                }
+                let col = byte_col[a];
                 let mut pen = 0.0;
                 for g in cluster.glyphs {
                     out.push(Shaped { face, glyph: g.id, col, x: pen + g.x, y: g.y });
@@ -420,4 +432,17 @@ mod tests {
         }
         assert_eq!(liga.len(), 2, "ligature glyphs still occupy one cell per character");
     }
+
+    /// "fi"/"fl" must never collapse into one glyph: in a grid that leaves an empty cell.
+    #[test]
+    fn no_many_to_one_ligatures() {
+        let mut t = Text::load(&Config::default(), 2.0);
+        for word in ["fi", "fl", "ffi", "Profile", "flag"] {
+            let cells: Vec<(char, u16)> = word.chars().enumerate().map(|(i, c)| (c, i as u16)).collect();
+            let cols: Vec<u16> = t.shape(&cells, REGULAR).iter().map(|g| g.col).collect();
+            let expected: Vec<u16> = (0..word.chars().count() as u16).collect();
+            assert_eq!(cols, expected, "{word}: every character needs its own cell");
+        }
+    }
 }
+
