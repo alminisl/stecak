@@ -159,10 +159,14 @@ impl Pane {
             config.shell.program.as_str()
         };
         let mut cmd = if let Some(command) = command {
-            // Run through the login shell so the user's PATH (npm, ~/.local/bin…) applies.
+            // Run through the login shell, with the PATH your interactive shell sets up
+            // (npm, ~/.local/bin…), which a login shell alone may not have.
             let shell = if config.shell.program.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()) } else { config.shell.program.clone() };
             let mut c = CommandBuilder::new(shell);
             c.args(["-lc", command]);
+            if let Some(path) = crate::ai::user_path() {
+                c.env("PATH", path);
+            }
             c
         } else if config.shell.program.is_empty() {
             CommandBuilder::new_default_prog()
