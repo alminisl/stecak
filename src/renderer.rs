@@ -409,6 +409,10 @@ impl Renderer {
         );
     }
 
+    pub fn has_bosancica(&self) -> bool {
+        self.text.has_bosancica
+    }
+
     /// Cell size in physical pixels.
     pub fn cell(&self) -> (f32, f32) {
         (self.text.cell_w, self.text.cell_h)

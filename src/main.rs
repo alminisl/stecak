@@ -307,7 +307,7 @@ impl App {
     }
 
     fn apply_config(&mut self, new: Config) {
-        let font_changed = new.font != self.config.font;
+        let font_changed = new.font != self.config.font || new.bosancica.font != self.config.bosancica.font;
         let image_changed = new.background_image.path != self.config.background_image.path || new.background_image.fit != self.config.background_image.fit;
         self.config = new;
         self.theme = Theme::from_config(&self.config);
@@ -424,6 +424,14 @@ impl App {
                 }
             }
             Action::FindNext | Action::FindPrev => self.search_step(if matches!(action, Action::FindNext) { Direction::Left } else { Direction::Right }),
+            Action::ToggleBosancica => {
+                let mut cfg = self.config.clone();
+                cfg.bosancica.enabled = !cfg.bosancica.enabled;
+                if cfg.bosancica.enabled && !self.r().has_bosancica() {
+                    log::warn!("Bosančica mode: font \"{}\" is not installed; see README", cfg.bosancica.font);
+                }
+                self.apply_and_save(cfg);
+            }
             Action::ClearScrollback => {
                 if let Some(p) = self.focused_pane() {
                     p.term.lock().grid_mut().clear_history();
@@ -900,6 +908,7 @@ impl App {
                 matches: &matches,
                 current: if searching { search.current.as_ref() } else { None },
                 hover: hover.filter(|h| h.0 == g.id).map(|h| h.1),
+                bosancica: config.bosancica.enabled,
             };
             let cache = caches.entry(g.id).or_default();
             let s = draw::draw_pane(r, &mut term, cache, theme, g.gx, g.gy, self.theme_gen, self.search_gen, &hl);
@@ -965,6 +974,7 @@ impl App {
         }
 
         if self.settings.open {
+            self.settings.bosancica_font_ok = r.has_bosancica();
             draw_settings(r, theme, &self.settings, config);
         }
 

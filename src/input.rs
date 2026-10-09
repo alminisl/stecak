@@ -22,6 +22,7 @@ pub enum Action {
     FindNext,
     FindPrev,
     ClearScrollback,
+    ToggleBosancica,
     FontBigger,
     FontSmaller,
     FontReset,
@@ -65,6 +66,7 @@ fn shortcut(event: &KeyEvent, m: ModifiersState) -> Option<Action> {
         "g" if shift => Action::FindPrev,
         "g" => Action::FindNext,
         "k" => Action::ClearScrollback,
+        "b" if shift || !mac => Action::ToggleBosancica,
         // iTerm2 conventions: Cmd+Shift+]/[ = tabs, Cmd+]/[ = panes.
         "]" | "}" if shift => Action::NextTab,
         "[" | "{" if shift => Action::PrevTab,

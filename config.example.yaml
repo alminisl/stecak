@@ -30,6 +30,12 @@ background_image:
   tint: 0.6            # theme background laid over the image
   fit: cover           # cover | contain | stretch | center
 
+bosancica:             # Cmd+Shift+B: draw text in the medieval Bosnian script
+  enabled: false
+  font: BoSanko2       # installed family, or a path to a .ttf/.otf (font not bundled; see README)
+  size: 1.15
+  weight: 0.4
+
 colors:
   foreground: "#cdd6f4"
   background: "#1e1e2e"
