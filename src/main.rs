@@ -2304,10 +2304,13 @@ impl ApplicationHandler<UserEvent> for App {
             attrs.with_titlebar_transparent(true).with_fullsize_content_view(true)
         };
         // Windows: title bar / taskbar / Alt+Tab icon, from the resource build.rs embeds.
+        // No redirection bitmap: the GPU draws through DirectComposition, and the legacy GDI
+        // surface would otherwise sit under it as an opaque white layer, so opacity blended
+        // the theme with white instead of the desktop (Windows Terminal sets the same flag).
         #[cfg(target_os = "windows")]
         let attrs = {
-            use winit::platform::windows::IconExtWindows;
-            attrs.with_window_icon(winit::window::Icon::from_resource(1, None).ok())
+            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+            attrs.with_window_icon(winit::window::Icon::from_resource(1, None).ok()).with_no_redirection_bitmap(true)
         };
         // Scripted test runs: float above other windows so macOS keeps drawing us, but never
         // take keyboard focus away from what the user is typing into.
@@ -2325,7 +2328,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         if self.config.window.blur {
-            apply_blur(&window, 20);
+            apply_blur(&window, 20, theme::luma(self.theme.bg) < 0.5);
         }
 
         let renderer = Renderer::new(window.clone(), Box::new(event_loop.owned_display_handle()), &self.config);
@@ -2581,8 +2584,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// Native background blur behind the transparent window, where the OS offers it.
-fn apply_blur(window: &Window, radius: i32) {
+/// Native background blur behind the transparent window, where the OS offers it. `dark`: the
+/// theme background is dark (Windows picks the matching acrylic).
+fn apply_blur(window: &Window, radius: i32, dark: bool) {
     #[cfg(target_os = "macos")]
     {
         // Same private window-server call Ghostty uses. An NSVisualEffectView would sit
@@ -2609,12 +2613,30 @@ fn apply_blur(window: &Window, radius: i32) {
     #[cfg(target_os = "windows")]
     {
         use window_vibrancy::{apply_acrylic, apply_blur as win_blur};
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+        use windows_sys::Win32::UI::Controls::MARGINS;
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        // The Windows 11 acrylic system backdrop. It only covers the window frame unless the
+        // frame is extended over the whole client area, behind our translucent background.
+        if let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) {
+            let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+            let dark = dark as i32;
+            let all = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+            // SAFETY: `hwnd` is our live window; both calls only read the values passed in.
+            unsafe {
+                // Dark mode: dark title bar, and the dark acrylic (the light one reads as
+                // near-opaque white frost behind a dark theme).
+                DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, (&dark as *const i32).cast(), 4);
+                DwmExtendFrameIntoClientArea(hwnd, &all);
+            }
+        }
+        // Older Windows without system backdrops: DWM blur-behind instead.
         if apply_acrylic(window, None).is_err() {
             let _ = win_blur(window, None);
         }
     }
     // Linux: blur is a compositor feature (KDE/Hyprland/Picom rules); transparency alone works.
-    let _ = (window, radius);
+    let _ = (window, radius, dark);
 }
 
 /// Poll the config file's mtime; cheap and works everywhere (including editors that
