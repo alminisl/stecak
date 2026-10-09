@@ -11,7 +11,7 @@ The name comes from the *stećci*, the medieval tombstones of Bosnia and Herzego
 - GPU rendering (Metal, DX12, Vulkan), programming ligatures, color emoji, tabs and splits.
 - Transparency and blur, an iTerm2-style background image, an in-app settings page, and a YAML/JSON config that reloads live.
 
-> **Status: alpha.** It's a daily driver on macOS. Windows and Linux build in CI but haven't been used day to day yet.
+> **Status: alpha.** It's a daily driver on macOS, and is now being used on Windows. Linux builds in CI but hasn't been used day to day yet.
 
 ## Install
 
@@ -31,6 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/alminisl/stecak/main/install.sh | s
 ```
 
 On macOS this installs `Stećak.app` plus a `stecak` command. On Linux it installs `~/.local/bin/stecak` and a desktop entry.
+
+**Windows 10/11:** download `stecak-v<version>-windows-x64-setup.exe` (or `-arm64-` for Snapdragon PCs) from [Releases](https://github.com/alminisl/stecak/releases) and run it. It installs for your user only (no admin prompt), adds Stećak to the Start menu, and can put `stecak` on your PATH. A portable `.zip` is there too. The installer isn't code-signed yet, so SmartScreen may warn: choose **More info › Run anyway**. Every push to `main` also builds one: open the CI run in GitHub Actions and download the **stecak-windows-x64** artifact.
 
 **Anywhere with Cargo (incl. Windows):**
 
@@ -203,11 +205,11 @@ bosancica:
 | OS | Transparency | Blur |
 |---|---|---|
 | macOS | ✅ verified (Metal, post-multiplied alpha) | ✅ window-server blur (same approach as Ghostty) |
-| Windows 10/11 | DX12 composition swapchain (DirectComposition) | Acrylic / blur via `window-vibrancy` |
+| Windows 10/11 | ✅ DX12 composition swapchain, premultiplied alpha (same approach as Windows Terminal) | Acrylic / blur via `window-vibrancy` |
 | Linux Wayland | ✅ via compositor alpha | compositor-dependent (KDE, Hyprland rules) |
 | Linux X11 | needs a compositing WM (picom, KWin, Mutter) | compositor rules |
 
-**Only macOS has been run so far.** Windows and Linux compile paths exist but are untested.
+Windows uses DX12 even when Vulkan is available, because Vulkan swapchains there are always opaque. Set `WGPU_BACKEND=vulkan` to override.
 
 ## What Stećak builds itself vs. what it reuses
 

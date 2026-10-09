@@ -214,9 +214,62 @@ pub fn process_name(pid: i32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn process_name(_pid: i32) -> Option<String> {
     None
+}
+
+#[cfg(windows)]
+struct WinProcess {
+    pid: u32,
+    parent: u32,
+    /// Lowercase, without ".exe" ("claude", "pwsh").
+    name: String,
+}
+
+/// Every running process, from a Toolhelp snapshot.
+#[cfg(windows)]
+fn windows_processes() -> Vec<WinProcess> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
+    let mut out = Vec::new();
+    // SAFETY: plain Win32 calls; the entry's dwSize is set before use and the handle is closed.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let name = crate::shell::program_stem(&String::from_utf16_lossy(&e.szExeFile[..len]));
+            out.push(WinProcess { pid: e.th32ProcessID, parent: e.th32ParentProcessID, name });
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+/// Windows has no foreground process group, so the pane's "foreground process" is found in
+/// the shell's process tree: the outermost agent if one runs, else the most deeply nested
+/// child (what you just started), else the shell itself.
+#[cfg(windows)]
+pub fn foreground(shell_pid: u32) -> Option<(u32, String)> {
+    let procs = windows_processes();
+    let children = |pid: u32| procs.iter().filter(move |p| p.parent == pid && p.pid != pid && !matches!(p.name.as_str(), "conhost" | "openconsole"));
+    let mut level: Vec<&WinProcess> = children(shell_pid).collect();
+    let mut deepest = None;
+    while !level.is_empty() {
+        if let Some(agent) = level.iter().find(|p| is_agent(&p.name)) {
+            return Some((agent.pid, agent.name.clone()));
+        }
+        deepest = level.last().map(|p| (p.pid, p.name.clone()));
+        level = level.iter().flat_map(|p| children(p.pid)).collect();
+    }
+    deepest.or_else(|| procs.iter().find(|p| p.pid == shell_pid).map(|p| (p.pid, p.name.clone())))
 }
 
 /// The session a running Claude Code process is in: Claude Code keeps

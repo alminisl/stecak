@@ -44,15 +44,38 @@ jobs:
           files: dist/*.tar.gz
 
   windows:
+    name: windows (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          # Cross-compiled on the x64 runner (its Visual Studio has the ARM64 toolchain).
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
-      - shell: pwsh
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Installer and zip
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/stecak.exe, README.md, LICENSE -DestinationPath "dist/stecak-$env:GITHUB_REF_NAME-windows-x86_64.zip"
+          choco install innosetup --no-progress -y
+          $version = "$env:GITHUB_REF_NAME".TrimStart('v')
+          $exe = "target/${{ matrix.target }}/release/stecak.exe"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" "/DArch=${{ matrix.arch }}" "/DExe=$($exe -replace '/', '\')" installer\stecak.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force dist/stecak | Out-Null
+          Copy-Item $exe, README.md, LICENSE, config.example.yaml dist/stecak/
+          Compress-Archive -Path dist/stecak/* -DestinationPath "dist/stecak-$env:GITHUB_REF_NAME-windows-${{ matrix.arch }}.zip"
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*-setup.exe
+            dist/*.zip

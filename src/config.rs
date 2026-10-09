@@ -138,7 +138,7 @@ impl Default for BosancicaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ShellConfig {
-    /// Empty = the user's default shell ($SHELL, or PowerShell on Windows).
+    /// Empty = the user's default shell ($SHELL, or PowerShell on Windows: pwsh when installed).
     pub program: String,
     pub args: Vec<String>,
 }

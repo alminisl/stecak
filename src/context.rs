@@ -137,13 +137,9 @@ pub fn last_usage(path: &Path) -> Option<(u64, String)> {
 /// session or running the user's hooks. The result arrives as `UserEvent::ContextBreakdown`.
 pub fn fetch_async(cwd: PathBuf, proxy: EventLoopProxy<UserEvent>) {
     let _ = std::thread::Builder::new().name("context".into()).spawn(move || {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let script = r#"claude -p --no-session-persistence --settings '{"disableAllHooks":true}' --output-format json /context"#;
-        let mut cmd = std::process::Command::new(shell);
-        cmd.args(["-lc", script]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        if let Some(path) = crate::ai::user_path() {
-            cmd.env("PATH", path);
-        }
+        let Some(mut cmd) = crate::shell::background(script, None) else { return };
+        cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if cwd.is_dir() {
             cmd.current_dir(&cwd);
         }

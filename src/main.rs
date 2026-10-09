@@ -6,6 +6,10 @@
 //! - portable-pty: cross-platform PTY (ConPTY on Windows)
 //! - swash: font shaping (ligatures) and rasterization
 
+// Windows: a GUI app, so launching it doesn't also open a console window. Logs and panics go
+// to `stecak.log` next to the config instead (see `init_logging`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod agents;
 mod ai;
 mod bgimage;
@@ -24,6 +28,7 @@ mod renderer;
 mod restore;
 mod search;
 mod settings;
+mod shell;
 mod text;
 mod theme;
 mod update;
@@ -2298,6 +2303,12 @@ impl ApplicationHandler<UserEvent> for App {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs.with_titlebar_transparent(true).with_fullsize_content_view(true)
         };
+        // Windows: title bar / taskbar / Alt+Tab icon, from the resource build.rs embeds.
+        #[cfg(target_os = "windows")]
+        let attrs = {
+            use winit::platform::windows::IconExtWindows;
+            attrs.with_window_icon(winit::window::Icon::from_resource(1, None).ok())
+        };
         // Scripted test runs: float above other windows so macOS keeps drawing us, but never
         // take keyboard focus away from what the user is typing into.
         let attrs = if std::env::var_os("STECAK_DEMO").is_some() {
@@ -2626,10 +2637,31 @@ fn watch_config(path: PathBuf, proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("stecak=info")).init();
+/// Log to stderr, and on Windows (no console) to `stecak.log` next to the config, so a crash
+/// leaves a reason behind. Panics are logged too: release builds abort on panic, silently.
+fn init_logging(config_path: &std::path::Path) {
+    let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("stecak=info"));
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = config_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+        if let Ok(file) = std::fs::File::create(dir.join("stecak.log")) {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = config_path;
+    builder.init();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("panic: {info}
+{}", std::backtrace::Backtrace::force_capture());
+        default_hook(info);
+    }));
+}
 
+fn main() {
     let config_path = config::find_config_path().unwrap_or_else(config::default_config_path);
+    init_logging(&config_path);
     let config = config::load();
     // `stecak -e <program> [args…]` runs a command instead of the login shell.
     let args: Vec<String> = std::env::args().collect();

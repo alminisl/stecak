@@ -187,37 +187,90 @@ pub fn open_file(path: &Path, line: Option<u32>, col: Option<u32>, editor: &str)
         open_url(&path.display().to_string());
         return None;
     }
-    let quoted = format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
     let editor = editor.trim();
+    let (ln, cn) = (line.unwrap_or(1).to_string(), col.unwrap_or(1).to_string());
     if !editor.is_empty() {
-        let mut cmd = editor.replace("{line}", &line.unwrap_or(1).to_string()).replace("{col}", &col.unwrap_or(1).to_string());
-        cmd = if cmd.contains("{file}") { cmd.replace("{file}", &quoted) } else { format!("{cmd} {quoted}") };
-        let program = editor.split_whitespace().next().and_then(|p| p.rsplit('/').next()).unwrap_or_default();
-        if TERMINAL_EDITORS.contains(&program) {
-            return Some(cmd);
+        let program = crate::shell::program_stem(editor.split_whitespace().next().unwrap_or_default());
+        if TERMINAL_EDITORS.contains(&program.as_str()) {
+            let file = crate::shell::quote(&path.display().to_string());
+            let cmd = editor.replace("{line}", &ln).replace("{col}", &cn);
+            return Some(if cmd.contains("{file}") { cmd.replace("{file}", &file) } else { format!("{cmd} {file}") });
         }
-        spawn_login_shell(&cmd, &[]);
+        open_with_template(editor, path, &ln, &cn);
         return None;
     }
-    // Auto: the first GUI editor with a command-line launcher, else the default app.
-    let fallback = if cfg!(target_os = "macos") { "open \"$F\"" } else { "xdg-open \"$F\"" };
-    let script = format!(
-        "L=\"$F${{LN:+:$LN}}${{CN:+:$CN}}\"; \
-         if command -v code >/dev/null; then code -g \"$L\"; \
-         elif command -v cursor >/dev/null; then cursor -g \"$L\"; \
-         elif command -v zed >/dev/null; then zed \"$L\"; \
-         else {fallback}; fi"
-    );
-    let (ln, cn) = (line.map(|l| l.to_string()).unwrap_or_default(), col.map(|c| c.to_string()).unwrap_or_default());
-    spawn_login_shell(&script, &[("F", &path.display().to_string()), ("LN", &ln), ("CN", &cn)]);
+    open_in_gui_editor(path, line, col);
     None
 }
 
+/// Run an `editor` template ({file}, {line}, {col}) in the background.
+#[cfg(windows)]
+fn open_with_template(editor: &str, path: &Path, ln: &str, cn: &str) {
+    // Fill in each word after splitting, so paths with spaces need no quoting.
+    let mut words = crate::shell::split_words(editor);
+    if !editor.contains("{file}") {
+        words.push("{file}".into());
+    }
+    let words: Vec<String> = words.iter().map(|w| w.replace("{file}", &path.display().to_string()).replace("{line}", ln).replace("{col}", cn)).collect();
+    let Some((program, args)) = words.split_first() else { return };
+    let mut cmd = std::process::Command::new(crate::shell::which(program).unwrap_or_else(|| program.into()));
+    cmd.args(args);
+    spawn_detached(cmd);
+}
+
+#[cfg(not(windows))]
+fn open_with_template(editor: &str, path: &Path, ln: &str, cn: &str) {
+    let quoted = crate::shell::quote(&path.display().to_string());
+    let cmd = editor.replace("{line}", ln).replace("{col}", cn);
+    let cmd = if cmd.contains("{file}") { cmd.replace("{file}", &quoted) } else { format!("{cmd} {quoted}") };
+    spawn_login_shell(&cmd, &[]);
+}
+
+/// Auto: the first GUI editor with a command-line launcher, else the default app.
+#[cfg(windows)]
+fn open_in_gui_editor(path: &Path, line: Option<u32>, col: Option<u32>) {
+    let mut target = path.display().to_string();
+    for n in [line, col].into_iter().map_while(|n| n) {
+        target.push_str(&format!(":{n}"));
+    }
+    for (program, flag) in [("code", Some("-g")), ("cursor", Some("-g")), ("zed", None)] {
+        if let Some(exe) = crate::shell::which(program) {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(flag).arg(&target);
+            spawn_detached(cmd);
+            return;
+        }
+    }
+    open_url(&path.display().to_string());
+}
+
+#[cfg(not(windows))]
+fn open_in_gui_editor(path: &Path, line: Option<u32>, col: Option<u32>) {
+    let fallback = if cfg!(target_os = "macos") { "open \"$F\"" } else { "xdg-open \"$F\"" };
+    let script = format!(
+        "L=\"$F${{LN:+:$LN}}${{CN:+:$CN}}\";          if command -v code >/dev/null; then code -g \"$L\";          elif command -v cursor >/dev/null; then cursor -g \"$L\";          elif command -v zed >/dev/null; then zed \"$L\";          else {fallback}; fi"
+    );
+    let (ln, cn) = (line.map(|l| l.to_string()).unwrap_or_default(), col.map(|c| c.to_string()).unwrap_or_default());
+    spawn_login_shell(&script, &[("F", &path.display().to_string()), ("LN", &ln), ("CN", &cn)]);
+}
+
+#[cfg(windows)]
+fn spawn_detached(mut cmd: std::process::Command) {
+    crate::ai::no_console(&mut cmd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new().name("open-file".into()).stack_size(64 * 1024).spawn(move || child.wait());
+        }
+        Err(e) => log::error!("could not open file: {e}"),
+    }
+}
+
 /// Run a command through the login shell (so PATH has `code`, `zed`…) without waiting.
+#[cfg(not(windows))]
 fn spawn_login_shell(script: &str, env: &[(&str, &str)]) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = std::process::Command::new(shell);
-    cmd.args(["-lc", script]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    crate::ai::no_console(&mut cmd).args(["-lc", script]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
     for (k, v) in env {
         cmd.env(k, v);
     }

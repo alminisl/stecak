@@ -34,7 +34,7 @@ pub fn check_async(proxy: EventLoopProxy<UserEvent>, manual: bool) {
                 let _ = proxy.send_event(UserEvent::UpdateNone(Some(why.to_string())));
             }
         };
-        let Ok(out) = Command::new("curl").args(["-fsSL", "--max-time", "8", "-H", "Accept: application/vnd.github+json", LATEST]).output() else {
+        let Ok(out) = crate::ai::no_console(&mut Command::new("curl")).args(["-fsSL", "--max-time", "8", "-H", "Accept: application/vnd.github+json", LATEST]).output() else {
             return fail("curl is not available");
         };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return fail("couldn't reach GitHub") };
