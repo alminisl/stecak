@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use winit::event_loop::EventLoopProxy;
 
@@ -31,6 +31,8 @@ pub enum UserEvent {
     ConfigChanged,
     /// A background image finished decoding (RGBA8, width, height).
     BackgroundImage(Option<(Vec<u8>, u32, u32)>),
+    /// A pane rang the bell or sent a desktop notification (agents waiting for input).
+    Notify(PaneId, Option<String>),
     /// One step of a scripted UI session (STECAK_DEMO), used for automated visual tests.
     Demo(String),
 }
@@ -60,6 +62,7 @@ pub struct Listener {
     writer: Writer,
     title: Arc<Mutex<String>>,
     size: Arc<Mutex<WindowSize>>,
+    bell: Arc<AtomicBool>,
 }
 
 impl EventListener for Listener {
@@ -74,6 +77,7 @@ impl EventListener for Listener {
                 let _ = self.writer.lock().write_all(s.as_bytes());
             }
             TermEvent::Title(t) => *self.title.lock() = t,
+            TermEvent::Bell => self.bell.store(true, Ordering::Release),
             TermEvent::ResetTitle => self.title.lock().clear(),
             // OSC 52: programs (e.g. vim/tmux over ssh) copying to the system clipboard.
             TermEvent::ClipboardStore(_, text) => {
@@ -95,6 +99,8 @@ pub struct Pane {
     pub term: Arc<Mutex<Term<Listener>>>,
     /// Set by the reader thread when output arrived since this pane was last drawn.
     pub fresh: Arc<AtomicBool>,
+    /// Milliseconds since the Unix epoch when output last arrived (agent "working" detection).
+    pub last_output: Arc<AtomicU64>,
     pub title: Arc<Mutex<String>>,
     writer: Writer,
     master: Box<dyn MasterPty + Send>,
@@ -111,6 +117,7 @@ impl Pane {
         size: GridSize,
         cell: (u16, u16),
         cwd: Option<&Path>,
+        command: Option<&str>,
         proxy: EventLoopProxy<UserEvent>,
         wakeup_pending: Arc<AtomicBool>,
     ) -> Result<Self, String> {
@@ -125,7 +132,13 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
-        let mut cmd = if config.shell.program.is_empty() {
+        let mut cmd = if let Some(command) = command {
+            // Run through the login shell so the user's PATH (npm, ~/.local/bin…) applies.
+            let shell = if config.shell.program.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()) } else { config.shell.program.clone() };
+            let mut c = CommandBuilder::new(shell);
+            c.args(["-lc", command]);
+            c
+        } else if config.shell.program.is_empty() {
             CommandBuilder::new_default_prog()
         } else {
             let mut c = CommandBuilder::new(&config.shell.program);
@@ -153,7 +166,8 @@ impl Pane {
             cell_width: cell_w,
             cell_height: cell_h,
         }));
-        let listener = Listener { writer: writer.clone(), title: title.clone(), size: window_size.clone() };
+        let bell = Arc::new(AtomicBool::new(false));
+        let listener = Listener { writer: writer.clone(), title: title.clone(), size: window_size.clone(), bell: bell.clone() };
         let term_config = TermConfig { scrolling_history: config.scrollback, ..Default::default() };
         let last_size = (size.cols, size.rows);
         let term = Arc::new(Mutex::new(Term::new(term_config, &size, listener)));
@@ -161,6 +175,8 @@ impl Pane {
         let term_reader = term.clone();
         let fresh = Arc::new(AtomicBool::new(true));
         let fresh_reader = fresh.clone();
+        let last_output = Arc::new(AtomicU64::new(0));
+        let last_output_reader = last_output.clone();
         std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
             .stack_size(256 * 1024)
@@ -173,6 +189,13 @@ impl Pane {
                         Ok(n) => {
                             parser.advance(&mut *term_reader.lock(), &buf[..n]);
                             fresh_reader.store(true, Ordering::Release);
+                            last_output_reader.store(now_ms(), Ordering::Release);
+                            for msg in crate::agents::notifications(&buf[..n]) {
+                                let _ = proxy.send_event(UserEvent::Notify(id, Some(msg)));
+                            }
+                            if bell.swap(false, Ordering::AcqRel) {
+                                let _ = proxy.send_event(UserEvent::Notify(id, None));
+                            }
                             // Coalesce: at most one wakeup in flight until the next frame is
                             // drawn, so a flood of output can't starve redraws and input.
                             if !wakeup_pending.swap(true, Ordering::AcqRel) {
@@ -185,7 +208,7 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { term, fresh, title, writer, master: pair.master, window_size, child, last_size })
+        Ok(Self { term, fresh, last_output, title, writer, master: pair.master, window_size, child, last_size })
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -219,6 +242,14 @@ impl Pane {
         if t.is_empty() { "shell".to_string() } else { t.clone() }
     }
 
+    /// Name of the pane's foreground process (e.g. "claude" while an agent runs).
+    pub fn foreground_process(&self) -> Option<String> {
+        #[cfg(unix)]
+        return self.master.process_group_leader().and_then(crate::agents::process_name);
+        #[cfg(not(unix))]
+        None
+    }
+
     /// The shell's current working directory, so new tabs/splits can open there.
     pub fn cwd(&self) -> Option<PathBuf> {
         process_cwd(self.child.process_id()?)
@@ -248,4 +279,8 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }

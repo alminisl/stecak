@@ -118,6 +118,7 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | F, G / Shift+G | find in scrollback, next / previous match |
 | K | clear scrollback |
 | = / - / 0 | font size bigger / smaller / reset |
+| Shift+A / Shift+S | agent split / session browser |
 | Shift+B | Bosančica mode on/off |
 | , | settings page |
 
@@ -138,6 +139,22 @@ background_image:
 ```
 
 The image is decoded on a worker thread and resized to the window, so a 4K wallpaper costs only window-size GPU memory. JPEGs are decoded directly at 1/2, 1/4 or 1/8 scale.
+
+## Built for AI agents (Claude Code, Codex)
+
+- **Working / waiting tabs:** while `claude` or `codex` is working in a tab, a carved rosette turns and an amber chisel stroke sweeps along the tab. When the agent finishes or needs permission, the tab shows a steady **●**.
+- **Alerts:** if you're in another app, you also get a macOS notification and a Dock bounce. Stećak listens to the terminal bell and to OSC 9/777 notifications. To make Claude Code use them, run `claude config set --global preferredNotifChannel terminal_bell` (or `iterm2`, to get the message text).
+- **Shift+Enter** inserts a newline in agent prompts.
+- **Clickable links:** links that agents print as OSC 8 hyperlinks, plus plain URLs, open with Cmd+click.
+- **Agent split:** **Cmd+Shift+A** opens your agent in a split, in the current folder (`agent.command`, default `claude`).
+- **Session browser:** **Cmd+Shift+S** lists your saved Claude Code and Codex sessions, newest first, with ● on live ones. Type to search. Enter or a click resumes a session in a new tab, in its folder.
+- **No flicker:** agent UIs redraw constantly, and synchronized output (mode 2026) is supported.
+
+```yaml
+agent:
+  command: claude       # or "codex"
+  notifications: true
+```
 
 ## Bosančica mode
 

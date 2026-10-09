@@ -162,6 +162,7 @@
     <div class="buttons">
       <a class="btn primary" href="https://github.com/alminisl/stecak/releases/latest">Download for macOS (.dmg)</a>
       <a class="btn ghost" href="https://github.com/alminisl/stecak">View on GitHub</a>
+      <a class="btn ghost" href="#agents">For AI agents</a>
       <a class="btn ghost" href="#benchmarks">Benchmarks</a>
       <a class="btn ghost" href="#heritage">What is a stećak?</a>
     </div>
@@ -194,11 +195,40 @@
           <li>Transparency and background blur</li>
           <li>Background images, like iTerm2</li>
           <li>Settings page and live-reloading config</li>
+          <li>Built for Claude Code and Codex</li>
         </ul>
       </div>
     </div>
   </section>
 
+
+
+  <section id="agents" style="padding-top:0">
+    <div class="wrap">
+      <h2>Built for AI agents</h2>
+      <p class="note" style="max-width:820px">Claude Code and Codex live in the terminal, so Stećak is built to host them well. It doesn't bundle an AI of its own. Nothing leaves your machine, and no API keys are needed.</p>
+      <div class="two">
+        <div>
+          <ul class="features" style="grid-template-columns:1fr">
+            <li><b>Working and waiting tabs.</b> While an agent works, a carved rosette turns and an amber chisel stroke sweeps along its tab. When it's done or needs permission, a steady dot appears.</li>
+            <li><b>Never miss a prompt.</b> If you're in another app, a notification and a Dock bounce tell you the agent needs you. Stećak reads the terminal bell and OSC 9/777.</li>
+            <li><b>Shift+Enter</b> adds a newline to multi-line prompts.</li>
+            <li><b>Clickable links</b>, whether the agent prints them as OSC 8 hyperlinks or plain URLs.</li>
+            <li><b>⌘⇧A</b> opens your agent in a split, in the current folder.</li>
+            <li><b>No flicker</b> while agent UIs redraw, thanks to synchronized output.</li>
+          </ul>
+        </div>
+        <img class="shot" src="img/agent-tab.png" alt="A tab running an agent: a turning rosette and an amber chisel stroke along the tab" loading="lazy">
+      </div>
+      <div class="two" style="margin-top:56px">
+        <img class="shot" src="img/sessions.png" alt="The session browser listing Claude Code sessions with folder, branch and age" loading="lazy">
+        <div>
+          <h3>Session browser</h3>
+          <p>Press <span class="mono">⌘⇧S</span> to see every saved Claude Code and Codex session, newest first, with a dot on the live ones. Type to search by prompt, folder or branch. Enter or a click resumes the session in a new tab, right where it was.</p>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section id="benchmarks" class="bench" style="padding-top:0">
     <div class="wrap">
