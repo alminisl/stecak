@@ -10,6 +10,7 @@ pub enum Item {
     FontSize,
     LineHeight,
     Ligatures,
+    Bosancica,
     Opacity,
     Blur,
     Padding,
@@ -27,6 +28,7 @@ pub const ITEMS: &[Item] = &[
     Item::FontSize,
     Item::LineHeight,
     Item::Ligatures,
+    Item::Bosancica,
     Item::Opacity,
     Item::Blur,
     Item::Padding,
@@ -47,6 +49,8 @@ pub struct Settings {
     pub selected: usize,
     /// Some while the background-image path is being typed.
     pub editing: Option<String>,
+    /// Whether the configured Bosančica font is installed (shown next to the toggle).
+    pub bosancica_font_ok: bool,
 }
 
 pub enum Outcome {
@@ -66,6 +70,7 @@ impl Item {
             Item::FontSize => "Font size",
             Item::LineHeight => "Line height",
             Item::Ligatures => "Ligatures",
+            Item::Bosancica => "Bosančica mode (⌘⇧B)",
             Item::Opacity => "Window opacity",
             Item::Blur => "Background blur (restart)",
             Item::Padding => "Padding",
@@ -85,6 +90,7 @@ impl Item {
             Item::FontSize => format!("{:.0}", c.font.size),
             Item::LineHeight => format!("{:.2}", c.font.line_height),
             Item::Ligatures => on_off(c.font.ligatures),
+            Item::Bosancica => on_off(c.bosancica.enabled),
             Item::Opacity => format!("{:.0}%", c.window.opacity * 100.0),
             Item::Blur => on_off(c.window.blur),
             Item::Padding => format!("{:.0}", c.window.padding),
@@ -112,6 +118,7 @@ impl Item {
             Item::FontSize => c.font.size = (c.font.size + d).clamp(6.0, 72.0),
             Item::LineHeight => c.font.line_height = ((c.font.line_height + 0.05 * d) * 100.0).round() / 100.0,
             Item::Ligatures => c.font.ligatures = !c.font.ligatures,
+            Item::Bosancica => c.bosancica.enabled = !c.bosancica.enabled,
             Item::Opacity => c.window.opacity = ((c.window.opacity + 0.05 * d).clamp(0.0, 1.0) * 100.0).round() / 100.0,
             Item::Blur => c.window.blur = !c.window.blur,
             Item::Padding => c.window.padding = (c.window.padding + 2.0 * d).clamp(0.0, 64.0),
@@ -204,6 +211,7 @@ impl Settings {
         ITEMS.iter().enumerate().map(move |(i, item)| {
             let value = match (&self.editing, item) {
                 (Some(buf), Item::ImagePath) => format!("{buf}▏"),
+                (_, Item::Bosancica) if !self.bosancica_font_ok => format!("{} — font \"{}\" not found", item.value(cfg), cfg.bosancica.font),
                 _ => item.value(cfg),
             };
             (item.label(), value, i == self.selected)

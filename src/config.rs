@@ -17,6 +17,7 @@ pub struct Config {
     pub shell: ShellConfig,
     pub tabs: TabsConfig,
     pub background_image: BackgroundImageConfig,
+    pub bosancica: BosancicaConfig,
     pub scrollback: usize,
     /// Treat macOS Option key as Alt (sends ESC-prefixed sequences).
     pub option_as_alt: bool,
@@ -99,6 +100,28 @@ impl BackgroundImageConfig {
     }
 }
 
+/// "Bosančica mode": draw terminal text with a Bosančica font. Fonts like BoSanko2 map
+/// ordinary Latin letters to Bosančica letterforms, so the text itself (and copy, search,
+/// what the shell receives) stays Latin; only the rendering changes. The font is not
+/// bundled; install one and name its family here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BosancicaConfig {
+    pub enabled: bool,
+    /// Installed family name, or a path to a .ttf/.otf file.
+    pub font: String,
+    /// Size multiplier on top of automatic cap-height matching.
+    pub size: f32,
+    /// Synthetic stroke thickening (0 = the font's own weight), for thin display fonts.
+    pub weight: f32,
+}
+
+impl Default for BosancicaConfig {
+    fn default() -> Self {
+        Self { enabled: false, font: "BoSanko2".into(), size: 1.15, weight: 0.4 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ShellConfig {
@@ -123,6 +146,7 @@ impl Default for Config {
             shell: ShellConfig::default(),
             tabs: TabsConfig::default(),
             background_image: BackgroundImageConfig::default(),
+            bosancica: BosancicaConfig::default(),
             scrollback: 2_000,
             option_as_alt: true,
         }

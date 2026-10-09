@@ -21,6 +21,10 @@ use crate::config::Config;
 pub const REGULAR: u8 = 0;
 pub const BOLD: u8 = 1;
 pub const ITALIC: u8 = 2;
+/// Face slot used for Bosančica mode (falls back to regular if the font isn't installed).
+pub const BOSANCICA: u8 = 4;
+/// First fallback face slot.
+const FIRST_FALLBACK: usize = 5;
 
 /// A font face backed by a memory-mapped file. Mapped pages are clean and shared with the
 /// OS file cache, so they don't count toward our footprint (unlike copying the file into a
@@ -78,8 +82,12 @@ pub struct RasterGlyph {
 }
 
 pub struct Text {
-    /// 0 regular, 1 bold, 2 italic, 3 bold italic, then fallbacks (opened lazily).
+    /// 0 regular, 1 bold, 2 italic, 3 bold italic, 4 Bosančica, then fallbacks (opened lazily).
     faces: Vec<Option<Face>>,
+    /// Whether the configured Bosančica font is installed.
+    pub has_bosancica: bool,
+    bosancica_scale: f32,
+    bosancica_embolden: f32,
     fallbacks: Vec<FontSource>,
     /// Characters missing from the primary font → face that has them.
     fallback_for: HashMap<char, u16>,
@@ -109,6 +117,20 @@ fn find_in_family(db: &fontdb::Database, name: &str, weight: fontdb::Weight, sty
         .filter(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
         .min_by_key(|f| (f.style != style) as i32 * 10_000 + (f.weight.0 as i32 - weight.0 as i32).abs())?;
     source_of(db, best.id)
+}
+
+/// The Bosančica font: an installed family name, or a path to a font file (`~` expanded).
+fn bosancica_source(db: &fontdb::Database, font: &str) -> Option<FontSource> {
+    let font = font.trim();
+    let is_path = font.contains('/') || font.contains('\\') || [".ttf", ".otf", ".ttc"].iter().any(|e| font.to_ascii_lowercase().ends_with(e));
+    if !is_path {
+        return find_in_family(db, font, fontdb::Weight::NORMAL, fontdb::Style::Normal);
+    }
+    let path = match font.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()?.join(rest),
+        None => std::path::PathBuf::from(font),
+    };
+    path.is_file().then_some(FontSource { path, index: 0 })
 }
 
 /// The first configured family that is installed, else the system monospace font.
@@ -149,6 +171,8 @@ impl Text {
             .iter()
             .filter_map(|name| find_in_family(&db, name, Weight::NORMAL, Style::Normal))
             .collect();
+        let bosancica = bosancica_source(&db, &cfg.bosancica.font).and_then(|s| Face::open(&s));
+        let has_bosancica = bosancica.is_some();
         drop(db);
 
         let px = (cfg.font.size * scale).round();
@@ -160,11 +184,25 @@ impl Text {
         let cell_w = glyph_m.advance_width(font.charmap().map('M')).round();
         let baseline = ((cell_h - natural_h) / 2.0 + m.ascent).round();
 
-        let mut faces = vec![Some(regular), bold, italic, bold_italic];
+        // Display fonts like BoSanko2 draw small letters for their em size; scale that face so
+        // its capitals match the main font's, otherwise the text looks shrunken in the cells.
+        let bosancica_scale = bosancica.as_ref().map_or(1.0, |b| {
+            let cap = |f: FontRef| {
+                let m = f.metrics(&[]);
+                let h = if m.cap_height > 0.0 { m.cap_height } else { m.ascent * 0.7 };
+                h / m.units_per_em as f32
+            };
+            (cap(regular.font()) / cap(b.font()) * cfg.bosancica.size).clamp(0.5, 3.0)
+        });
+        let bosancica_embolden = cfg.bosancica.weight.max(0.0);
+        let mut faces = vec![Some(regular), bold, italic, bold_italic, bosancica];
         faces.extend(fallbacks.iter().map(|_| None));
 
         Text {
             faces,
+            has_bosancica,
+            bosancica_scale,
+            bosancica_embolden,
             fallbacks,
             fallback_for: HashMap::new(),
             px,
@@ -176,6 +214,10 @@ impl Text {
             scale_ctx: ScaleContext::new(),
             shape_cache: HashMap::new(),
         }
+    }
+
+    fn face_px(&self, face: u16) -> f32 {
+        if face == BOSANCICA as u16 { (self.px * self.bosancica_scale).round() } else { self.px }
     }
 
     fn face(&self, i: u16) -> &Face {
@@ -191,7 +233,7 @@ impl Text {
         }
         let mut found = style as u16;
         for (i, src) in self.fallbacks.iter().enumerate() {
-            let slot = &mut self.faces[4 + i];
+            let slot = &mut self.faces[FIRST_FALLBACK + i];
             if slot.is_none() {
                 *slot = Face::open(src);
                 if slot.is_none() {
@@ -200,7 +242,7 @@ impl Text {
                 log::info!("loaded fallback font {}", src.path.display());
             }
             if slot.as_ref().is_some_and(|f| f.font().charmap().map(c) != 0) {
-                found = (4 + i) as u16;
+                found = (FIRST_FALLBACK + i) as u16;
                 break;
             }
         }
@@ -244,7 +286,8 @@ impl Text {
                 end_char += 1;
             }
             let font = face_in(&self.faces, face).font();
-            let mut shaper = self.shape_ctx.builder(font).size(self.px).features(features.iter().copied()).build();
+            let px = self.face_px(face);
+            let mut shaper = self.shape_ctx.builder(font).size(px).features(features.iter().copied()).build();
             shaper.add_str(&s[start_byte..end_byte]);
             shaper.shape_with(|cluster| {
                 let col = byte_col[start_byte + cluster.source.start as usize];
@@ -268,12 +311,17 @@ impl Text {
 
     pub fn rasterize(&mut self, face: u16, glyph: u16) -> Option<RasterGlyph> {
         let font = face_in(&self.faces, face).font();
-        let mut scaler = self.scale_ctx.builder(font).size(self.px).hint(true).build();
+        let px = self.face_px(face);
+        let mut scaler = self.scale_ctx.builder(font).size(px).hint(true).build();
         // Color sources first so emoji fonts (sbix/COLR) render in color; plain fonts fall
         // through to the outline and produce an alpha mask.
-        let img = Render::new(&[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline])
-            .format(Format::Alpha)
-            .render(&mut scaler, glyph)?;
+        let mut render = Render::new(&[Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline]);
+        render.format(Format::Alpha);
+        if face == BOSANCICA as u16 && self.bosancica_embolden > 0.0 {
+            // Thicken thin calligraphic strokes so they stay legible at terminal sizes.
+            render.embolden(self.bosancica_embolden * px / 28.0);
+        }
+        let img = render.render(&mut scaler, glyph)?;
         Some(RasterGlyph {
             left: img.placement.left,
             top: img.placement.top,

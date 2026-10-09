@@ -46,6 +46,8 @@ pub struct Highlights<'a> {
     pub current: Option<&'a Match>,
     /// URL under the mouse while the open-link modifier is held: (line, start col, end col).
     pub hover: Option<(i32, usize, usize)>,
+    /// Draw all text with the Bosančica face.
+    pub bosancica: bool,
 }
 
 /// A run of adjacent cells in one row sharing style and color, shaped as one unit.
@@ -200,7 +202,7 @@ fn build_row(
         }
 
         let c = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
-        let style = bold as u8 * text::BOLD + cell.flags.contains(Flags::ITALIC) as u8 * text::ITALIC;
+        let style = if hl.bosancica { text::BOSANCICA } else { bold as u8 * text::BOLD + cell.flags.contains(Flags::ITALIC) as u8 * text::ITALIC };
         match &mut cur {
             Some(run) if run.style == style && run.fg == fg => run.cells.push((c, (col - run.col0) as u16)),
             _ => {

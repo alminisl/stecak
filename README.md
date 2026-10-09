@@ -118,6 +118,7 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | F, G / Shift+G | find in scrollback, next / previous match |
 | K | clear scrollback |
 | = / - / 0 | font size bigger / smaller / reset |
+| Shift+B | Bosančica mode on/off |
 | , | settings page |
 
 Mouse:
@@ -137,6 +138,22 @@ background_image:
 ```
 
 The image is decoded on a worker thread and resized to the window, so a 4K wallpaper costs only window-size GPU memory. JPEGs are decoded directly at 1/2, 1/4 or 1/8 scale.
+
+## Bosančica mode
+
+Press **Cmd+Shift+B** (Ctrl+Shift+B on Linux and Windows), or toggle it in Settings, to draw the terminal in *bosančica*, the medieval Bosnian script.
+
+Fonts like **BoSanko2** map ordinary Latin letters to Bosančica letterforms, so only the rendering changes. What you type, copy and search stays plain text.
+
+The font isn't bundled. **BoSanko2** is the work of designer **Miomirka Mila Melank**, and it's used by the [e-bosanski.ba Bosančica converter](https://www.e-bosanski.ba/konverter-pisama/bosancica/). Get it from its author, install it, or point the config at the file:
+
+```yaml
+bosancica:
+  enabled: true
+  font: BoSanko2          # an installed family name, or a path like ~/Downloads/BoSanko2.ttf
+  size: 1.15              # multiplier on top of automatic size matching
+  weight: 0.4             # stroke thickening for thin display fonts (0 = none)
+```
 
 ## Transparency per OS
 
