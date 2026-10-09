@@ -100,7 +100,7 @@ impl Item {
             Item::OptionAsAlt => "Option key as Alt",
             Item::AlwaysShowTabs => "Always show tab bar",
             Item::Welcome => "Welcome screen at launch",
-            Item::RestoreSession => "Reopen tabs at launch",
+            Item::RestoreSession => "Restore sessions at launch",
             Item::AgentNotifications => "Agent notifications",
             Item::CheckUpdates => "Check for updates at launch",
             Item::Shortcuts => "Keyboard shortcuts…",
