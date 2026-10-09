@@ -31,7 +31,7 @@ pub enum UserEvent {
     ConfigChanged,
     /// A background image finished decoding (RGBA8, width, height).
     BackgroundImage(Option<(Vec<u8>, u32, u32)>),
-    /// One step of a scripted UI session (LUMEN_DEMO), used for automated visual tests.
+    /// One step of a scripted UI session (STECAK_DEMO), used for automated visual tests.
     Demo(String),
 }
 
@@ -134,7 +134,7 @@ impl Pane {
         };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "lumen");
+        cmd.env("TERM_PROGRAM", "stecak");
         match cwd.map(Path::to_path_buf).or_else(dirs::home_dir) {
             Some(dir) if dir.is_dir() => cmd.cwd(dir),
             _ => {}

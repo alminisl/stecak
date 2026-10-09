@@ -1,14 +1,46 @@
-# Lumen — GPU terminal emulator (proof of concept)
+<p align="center"><img src="assets/icon-1024.png" width="160" alt="Stećak icon: a stećak tombstone with a carved rosette and a terminal prompt"></p>
 
-A small, fast, cross-platform terminal: GPU rendering, tabs, ligatures, transparency,
-and a hot-reloaded YAML/JSON config. ~4,100 lines of Rust.
+# Stećak
+
+A fast, lightweight GPU terminal emulator, written in Rust.
+
+The name comes from the *stećci*, the medieval tombstones of Bosnia and Herzegovina (UNESCO World Heritage). They're carved with inscriptions meant to last for centuries. This is a terminal, which is all text, so it seemed fitting.
+
+- **Fast:** the fastest of four terminals on [vtebench](https://github.com/alacritty/vtebench) on an Apple M5: 141 ms, vs Ghostty 191 ms, Terminal.app 2,611 ms and iTerm2 12,383 ms.
+- **Light:** ~33 MB per window at rest, and extra tabs and splits cost about 1 MB each.
+- GPU rendering (Metal, DX12, Vulkan), programming ligatures, color emoji, tabs and splits.
+- Transparency and blur, an iTerm2-style background image, an in-app settings page, and a YAML/JSON config that reloads live.
+
+> **Status: alpha.** It's a daily driver on macOS. Windows and Linux build in CI but haven't been used day to day yet.
+
+## Install
+
+**macOS:** download `Stecak-<version>-macos-universal.dmg` from [Releases](https://github.com/alminisl/ste-ak/releases) and drag Stećak to Applications.
+The app isn't notarized yet, so on first launch right-click it and choose **Open**, or run:
 
 ```sh
-cargo run --release                 # login shell
-cargo run --release -- -e htop      # run a command instead
+xattr -dr com.apple.quarantine "/Applications/Stećak.app"
 ```
 
-## Rust or C++? → Rust
+**From source (macOS, Linux):** needs [Rust](https://rustup.rs).
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alminisl/ste-ak/main/install.sh | sh
+# or from a checkout:
+./install.sh
+```
+
+On macOS this installs `Stećak.app` plus a `stecak` command. On Linux it installs `~/.local/bin/stecak` and a desktop entry.
+
+**Anywhere with Cargo (incl. Windows):**
+
+```sh
+cargo install --git https://github.com/alminisl/ste-ak
+```
+
+Run `stecak` for your login shell, or `stecak -e htop` to run a command instead.
+
+## Why Rust (and not C++)
 
 | | Rust | C++ |
 |---|---|---|
@@ -46,7 +78,7 @@ clear pick. C++ only wins if you want Qt widgets or must embed into an existing 
 
 ## Measurements (Apple M5, macOS 27, release build, 100×30 window)
 
-| | Lumen | iTerm2 |
+| | Stećak | iTerm2 |
 |---|---|---|
 | `cat` 34 MB of colored, ligature-heavy text (avg of 3) | **0.38 s**, screen updating live | 4.70 s |
 | Memory, idle, 1 pane | **33 MB** | ~730 MB total with your existing sessions; about 40 MB per extra window |
@@ -62,16 +94,16 @@ Where the 33 MB goes:
 - ~20 MB is macOS framework overhead that any AppKit + Metal app pays (window, menus, CoreAnimation, Metal driver).
 - ~5 MB is swapchain buffers, which scale with window size.
 - ~2 MB is the first block of terminal grid.
-- Lumen's own data (atlases, caches) is under 1 MB.
+- Stećak's own data (atlases, caches) is under 1 MB.
 
 The Metal driver also uses about 70 MB more for roughly a second after launch, then releases it.
 
-Set `LUMEN_STATS=1` to log frame statistics.
+Set `STECAK_STATS=1` to log frame statistics.
 
 ## Configuration
 
-`~/.config/lumen/config.yaml` (or `.yml` / `.json`; `%APPDATA%\lumen\` on Windows, or set
-`LUMEN_CONFIG`). It's reloaded live on save. **Cmd+,** (Ctrl+Shift+, elsewhere) creates the
+`~/.config/stecak/config.yaml` (or `.yml` / `.json`; `%APPDATA%\stecak\` on Windows, or set
+`STECAK_CONFIG`). It's reloaded live on save. **Cmd+,** (Ctrl+Shift+, elsewhere) creates the
 file and opens it. See [`config.example.yaml`](config.example.yaml).
 
 ## Shortcuts (Cmd on macOS, Ctrl+Shift on Windows/Linux)
@@ -117,9 +149,9 @@ The image is decoded on a worker thread and resized to the window, so a 4K wallp
 
 **Only macOS has been run so far.** Windows and Linux compile paths exist but are untested.
 
-## What Lumen builds itself vs. what it reuses
+## What Stećak builds itself vs. what it reuses
 
-Lumen uses the **`alacritty_terminal` library crate**: the VT/ANSI parser, the grid/scrollback storage, and the selection, regex-search and damage-tracking primitives. That's the same core Zed's built-in terminal uses. It does **not** use or wrap the Alacritty *app*. The following are all Lumen's own code:
+Stećak uses the **`alacritty_terminal` library crate**: the VT/ANSI parser, the grid/scrollback storage, and the selection, regex-search and damage-tracking primitives. That's the same core Zed's built-in terminal uses. It does **not** use or wrap the Alacritty *app*. The following are all Stećak's own code:
 - window and renderer (wgpu; Alacritty uses OpenGL)
 - font loading and fallback
 - shaping and ligatures (Alacritty has no ligatures)
@@ -128,9 +160,24 @@ Lumen uses the **`alacritty_terminal` library crate**: the VT/ANSI parser, the g
 - background image, settings page, search UI, mouse/URL handling
 - damage cache, frame skipping and config
 
-## Not done yet
+## Roadmap
 
-- Windows and Linux builds are written but not yet run.
-- Resizing splits with the mouse (splits are currently equal halves)
-- Compressed scrollback. Would need its own grid instead of `alacritty_terminal`'s, which is the main remaining memory lever.
-- Kitty keyboard protocol, inline images (sixel/kitty graphics), IME composition
+- **Before a public beta:**
+  - signed, notarized macOS app
+  - Windows and Linux actually run day to day (today they only build in CI)
+  - vttest/esctest compatibility pass
+  - panic recovery per pane
+  - IME tested with real input methods (support is implemented but unverified)
+- **For 1.0:**
+  - kitty keyboard protocol
+  - shell integration (OSC 7, OSC 133, OSC 8 links)
+  - multiple windows and session restore
+  - configurable key bindings
+  - VoiceOver support and auto-update
+- **Later:**
+  - inline images (kitty graphics, sixel)
+  - compressed scrollback (needs its own grid instead of `alacritty_terminal`'s; the main remaining memory lever)
+
+## License
+
+[MIT](LICENSE)

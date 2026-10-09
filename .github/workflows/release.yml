@@ -1,0 +1,58 @@
+name: Release
+
+# Push a tag like v0.1.0 to build downloadable binaries and attach them to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: sh scripts/bundle-macos.sh universal
+      - run: sh scripts/make-dmg.sh "dist/Stecak-${GITHUB_REF_NAME}-macos-universal.dmg"
+      - run: cd dist && ditto -c -k --keepParent "Stećak.app" "stecak-${GITHUB_REF_NAME}-macos-universal.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - run: cargo build --release
+      - run: |
+          mkdir -p dist/stecak
+          cp target/release/stecak assets/stecak.desktop assets/icon-1024.png README.md LICENSE dist/stecak/
+          tar -C dist -czf "dist/stecak-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" stecak
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/stecak.exe, README.md, LICENSE -DestinationPath "dist/stecak-$env:GITHUB_REF_NAME-windows-x86_64.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

@@ -1,9 +1,9 @@
 //! Configuration: loaded from YAML or JSON, with sane defaults for every field.
 //!
 //! Search order (first hit wins):
-//!   $LUMEN_CONFIG
-//!   $XDG_CONFIG_HOME/lumen/config.{yaml,yml,json}  (falls back to ~/.config)
-//!   <platform config dir>/lumen/config.{yaml,yml,json}  (e.g. %APPDATA% on Windows)
+//!   $STECAK_CONFIG
+//!   $XDG_CONFIG_HOME/stecak/config.{yaml,yml,json}  (falls back to ~/.config)
+//!   <platform config dir>/stecak/config.{yaml,yml,json}  (e.g. %APPDATA% on Windows)
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -237,20 +237,20 @@ pub fn hex_or(s: &str, fallback: [f32; 3]) -> [f32; 3] {
 fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs_out = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        dirs_out.push(PathBuf::from(xdg).join("lumen"));
+        dirs_out.push(PathBuf::from(xdg).join("stecak"));
     }
     if let Some(home) = dirs::home_dir() {
-        dirs_out.push(home.join(".config").join("lumen"));
+        dirs_out.push(home.join(".config").join("stecak"));
     }
     if let Some(cfg) = dirs::config_dir() {
-        dirs_out.push(cfg.join("lumen"));
+        dirs_out.push(cfg.join("stecak"));
     }
     dirs_out
 }
 
 /// Path of an existing config file, if any.
 pub fn find_config_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("LUMEN_CONFIG") {
+    if let Ok(p) = std::env::var("STECAK_CONFIG") {
         return Some(PathBuf::from(p));
     }
     for dir in candidate_dirs() {
@@ -302,7 +302,7 @@ pub fn save(cfg: &Config, path: &Path) -> std::io::Result<()> {
     let text = if is_json {
         serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?
     } else {
-        format!("# Lumen configuration (hot-reloaded on save; also editable from the settings page, Cmd+,)\n{}", serde_yaml::to_string(cfg).map_err(std::io::Error::other)?)
+        format!("# Stećak configuration (hot-reloaded on save; also editable from the settings page, Cmd+,)\n{}", serde_yaml::to_string(cfg).map_err(std::io::Error::other)?)
     };
     std::fs::write(path, text)
 }

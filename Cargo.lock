@@ -1158,34 +1158,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "lumen"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "arboard",
- "bytemuck",
- "dirs",
- "env_logger",
- "fontdb",
- "image",
- "jpeg-decoder",
- "libc",
- "log",
- "memmap2",
- "objc2 0.6.5",
- "parking_lot",
- "pollster",
- "portable-pty",
- "serde",
- "serde_json",
- "serde_yaml",
- "swash",
- "wgpu",
- "window-vibrancy",
- "winit",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2339,6 +2311,34 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "stecak"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "arboard",
+ "bytemuck",
+ "dirs",
+ "env_logger",
+ "fontdb",
+ "image",
+ "jpeg-decoder",
+ "libc",
+ "log",
+ "memmap2",
+ "objc2 0.6.5",
+ "parking_lot",
+ "pollster",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "swash",
+ "wgpu",
+ "window-vibrancy",
+ "winit",
+]
 
 [[package]]
 name = "strict-num"
