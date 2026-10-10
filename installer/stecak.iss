@@ -69,10 +69,17 @@ Name: "{autodesktop}\Stećak"; Filename: "{app}\stecak.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\stecak.exe"; Description: "{cm:LaunchProgram,Stećak}"; Flags: nowait postinstall skipifsilent
+; In-app updates run this setup silently with /relaunch=1 (src/update.rs): start it again.
+Filename: "{app}\stecak.exe"; Flags: nowait runasoriginaluser; Check: RelaunchRequested
 
 [Code]
 const
   EnvKey = 'Environment';
+
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;
 
 { Add the install folder to the user's PATH (HKCU), once. }
 procedure EnvAddPath(Dir: string);
