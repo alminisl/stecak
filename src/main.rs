@@ -136,6 +136,9 @@ struct App {
     tabs: Vec<Tab>,
     active: usize,
     next_id: PaneId,
+    /// The first tab's shell, started on a thread while the GPU initializes (Windows takes
+    /// ~250 ms to attach a process to a pseudo-console).
+    prespawned: Option<std::thread::JoinHandle<Result<Pane, String>>>,
 
     modifiers: ModifiersState,
     mouse: (f32, f32),
@@ -220,6 +223,7 @@ impl App {
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
+            prespawned: None,
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
             drag: None,
@@ -326,7 +330,12 @@ impl App {
         self.next_id += 1;
         let cwd = cwd.or_else(|| self.focused_pane().and_then(|p| p.cwd()));
         let size = GridSize { cols: 80, rows: 24 }; // corrected by resize_all() right after
-        match Pane::spawn(id, &self.shell_config(), size, self.cell_px(), cwd.as_deref(), command, self.proxy.clone(), self.wakeup_pending.clone()) {
+        let prespawned = self.prespawned.take().filter(|_| command.is_none() && cwd.is_none());
+        let result = match prespawned {
+            Some(handle) => handle.join().unwrap_or_else(|_| Err("shell spawn thread panicked".into())),
+            None => Pane::spawn(id, &self.shell_config(), size, self.cell_px(), cwd.as_deref(), command, self.proxy.clone(), self.wakeup_pending.clone()),
+        };
+        match result {
             Ok(p) => {
                 self.panes.insert(id, p);
                 Some(id)
@@ -2331,7 +2340,15 @@ impl ApplicationHandler<UserEvent> for App {
             apply_blur(&window, 20, theme::luma(self.theme.bg) < 0.5);
         }
 
-        let renderer = Renderer::new(window.clone(), Box::new(event_loop.owned_display_handle()), &self.config);
+        // Start the first tab's shell now, in parallel with GPU setup. Not when a saved
+        // session will be restored instead. It becomes pane `next_id` (the first spawn).
+        if !(self.restoring_enabled() && restore::load(self.config_dir()).is_some()) {
+            let (id, cfg, proxy, wakeup) = (self.next_id, self.shell_config(), self.proxy.clone(), self.wakeup_pending.clone());
+            // Placeholder size; resize_all() fixes it once the tab exists.
+            let spawn = move || Pane::spawn(id, &cfg, GridSize { cols: 80, rows: 24 }, (8, 16), None, None, proxy, wakeup);
+            self.prespawned = std::thread::Builder::new().name("prespawn".into()).spawn(spawn).ok();
+        }
+        let renderer = Renderer::new(window.clone(), event_loop.owned_display_handle(), &self.config);
         if !renderer.transparent {
             log::warn!("this GPU/compositor does not support a transparent swapchain; opacity is ignored");
         }

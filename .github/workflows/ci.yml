@@ -31,6 +31,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          ./scripts/fetch-conpty.ps1 -Arch x64 -Dest target/release
           choco install innosetup --no-progress -y
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=0.0.0-dev" /DArch=x64 installer\stecak.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -40,4 +41,6 @@ jobs:
           name: stecak-windows-x64
           path: |
             target/release/stecak.exe
+            target/release/conpty.dll
+            target/release/OpenConsole.exe
             dist/*-setup.exe
