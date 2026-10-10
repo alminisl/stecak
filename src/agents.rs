@@ -17,8 +17,9 @@ pub fn notifications(buf: &[u8]) -> Vec<String> {
         let end = buf[start..].iter().position(|&b| b == 0x07 || b == 0x1b).map(|e| start + e).unwrap_or(buf.len());
         let body = String::from_utf8_lossy(&buf[start..end]);
         if let Some(msg) = body.strip_prefix("9;") {
-            // "9;4;…" is ConEmu's progress-bar sequence, not a notification.
-            if !msg.starts_with("4;") && !msg.is_empty() {
+            // "9;4;…" is ConEmu's progress bar and "9;9;…" the shell's folder (see
+            // `reported_cwd`), not notifications.
+            if !msg.starts_with("4;") && !msg.starts_with("9;") && !msg.is_empty() {
                 out.push(msg.to_string());
             }
         } else if let Some(rest) = body.strip_prefix("777;notify;") {
@@ -28,6 +29,26 @@ pub fn notifications(buf: &[u8]) -> Vec<String> {
         i = end.max(start);
     }
     out
+}
+
+/// The last folder a shell reported with OSC 9;9 ("ESC ] 9;9;"C:\path" BEL", the ConEmu /
+/// Windows Terminal sequence; PowerShell's `cd` doesn't change the process's own folder, so
+/// this is how Windows learns it).
+/// shortcut: a sequence split across two reads is missed; the next prompt reports it again.
+pub fn reported_cwd(buf: &[u8]) -> Option<PathBuf> {
+    let mut found = None;
+    let mut i = 0;
+    while let Some(pos) = find(&buf[i..], b"\x1b]9;9;") {
+        let start = i + pos + 6;
+        let Some(len) = buf[start..].iter().position(|&b| b == 0x07 || b == 0x1b) else { break };
+        let path = String::from_utf8_lossy(&buf[start..start + len]);
+        let path = path.trim_matches('"');
+        if !path.is_empty() {
+            found = Some(PathBuf::from(path));
+        }
+        i = start + len;
+    }
+    found
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -310,6 +331,17 @@ mod tests {
         let out = notifications(b"hi\x1b]9;Claude needs your permission\x07x\x1b]9;4;1;50\x07\x1b]777;notify;Codex;Done\x1b\\");
         assert_eq!(out, vec!["Claude needs your permission".to_string(), "Codex: Done".to_string()]);
         assert!(notifications(b"plain output").is_empty());
+        assert!(notifications(b"\x1b]9;9;\"C:\\x\"\x07").is_empty());
+    }
+
+    #[test]
+    fn reads_reported_cwd() {
+        let out = b"PS> \x1b]9;9;\"C:\\Users\\a\"\x07ls\r\n\x1b]9;9;\"F:\\My Projects\"\x1b\\PS> ";
+        assert_eq!(reported_cwd(out), Some(PathBuf::from("F:\\My Projects")));
+        assert_eq!(reported_cwd(b"\x1b]9;9;/home/a\x07"), Some(PathBuf::from("/home/a")));
+        assert_eq!(reported_cwd(b"no osc here"), None);
+        // Unterminated (split across reads): ignored.
+        assert_eq!(reported_cwd(b"\x1b]9;9;\"C:\\half"), None);
     }
 
     #[test]

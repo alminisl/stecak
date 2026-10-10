@@ -120,6 +120,8 @@ pub struct Pane {
     pub title: Arc<Mutex<String>>,
     /// The last command that finished, when the shell reports commands (shell integration).
     pub last_command: Arc<Mutex<Option<crate::ai::CommandRecord>>>,
+    /// The folder the shell last reported (OSC 9;9; PowerShell integration).
+    reported_cwd: Arc<Mutex<Option<PathBuf>>>,
     writer: Writer,
     master: Box<dyn MasterPty + Send>,
     window_size: Arc<Mutex<WindowSize>>,
@@ -165,6 +167,7 @@ impl Pane {
         } else if cfg!(windows) || !config.shell.program.is_empty() {
             let mut c = CommandBuilder::new(&shell);
             c.args(&shell_args);
+            c.args(crate::ai::integration_args(integration_shell, &shell_args));
             c
         } else {
             CommandBuilder::new_default_prog()
@@ -208,6 +211,8 @@ impl Pane {
         let last_output = Arc::new(AtomicU64::new(0));
         let last_output_reader = last_output.clone();
         let last_command = Arc::new(Mutex::new(None));
+        let reported_cwd = Arc::new(Mutex::new(None));
+        let reported_cwd_reader = reported_cwd.clone();
         let last_command_reader = last_command.clone();
         std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
@@ -225,6 +230,9 @@ impl Pane {
                             last_output_reader.store(now_ms(), Ordering::Release);
                             if let Some(record) = tracker.feed(&buf[..n]) {
                                 *last_command_reader.lock() = Some(record);
+                            }
+                            if let Some(dir) = crate::agents::reported_cwd(&buf[..n]) {
+                                *reported_cwd_reader.lock() = Some(dir);
                             }
                             for msg in crate::agents::notifications(&buf[..n]) {
                                 let _ = proxy.send_event(UserEvent::Notify(id, Some(msg)));
@@ -244,7 +252,7 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { term, fresh, last_output, title, last_command, writer, master: pair.master, window_size, child, last_size })
+        Ok(Self { term, fresh, last_output, title, last_command, reported_cwd, writer, master: pair.master, window_size, child, last_size })
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -307,6 +315,9 @@ impl Pane {
 
     /// The shell's current working directory, so new tabs/splits can open there.
     pub fn cwd(&self) -> Option<PathBuf> {
+        if let Some(dir) = self.reported_cwd.lock().clone() {
+            return Some(dir);
+        }
         process_cwd(self.child.process_id()?)
     }
 }

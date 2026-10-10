@@ -307,6 +307,26 @@ fi
 "#;
 
 /// Environment that loads shell integration into a new shell, if we have it for that shell.
+/// PowerShell integration: wrap the prompt (yours, oh-my-posh's…) so each prompt reports the
+/// current folder with OSC 9;9, as Windows Terminal does. PowerShell's `cd` doesn't change the
+/// process's own folder, so without this new tabs and restored sessions can't follow it.
+/// Single quotes only, so it survives Windows command-line quoting as one argument.
+const PWSH_PROMPT: &str = "$global:__stecak_prompt = $function:prompt; \
+function global:prompt { $l = $executionContext.SessionState.Path.CurrentLocation; \
+$o = ''; if ($l.Provider.Name -eq 'FileSystem') { $o = [string][char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]7 }; \
+$o + (& $global:__stecak_prompt) }";
+
+/// Extra arguments that turn on integration for `shell_program` (PowerShell), unless the
+/// configured arguments already run a command of their own.
+pub fn integration_args(shell_program: &str, args: &[String]) -> Vec<String> {
+    let stem = crate::shell::program_stem(shell_program);
+    let own_command = args.iter().any(|a| ["-c", "-command", "-file", "-f", "-encodedcommand", "-e"].contains(&a.to_ascii_lowercase().as_str()));
+    if !matches!(stem.as_str(), "pwsh" | "powershell") || own_command {
+        return Vec::new();
+    }
+    vec!["-NoExit".into(), "-Command".into(), PWSH_PROMPT.into()]
+}
+
 pub fn integration_env(shell_program: &str) -> Vec<(String, String)> {
     let name = Path::new(shell_program).file_name().and_then(|n| n.to_str()).unwrap_or_default();
     if name != "zsh" {
