@@ -1200,7 +1200,7 @@ impl App {
             "send" => self.send_selection(),
             "check-update" => update::check_async(self.proxy.clone(), true),
             "update-go" => self.update_action(true, event_loop),
-            "update" => self.update = Some(UpdateUi::Available(update::Release { version: arg.to_string(), page: String::new(), dmg: None })),
+            "update" => self.update = Some(UpdateUi::Available(update::Release { version: arg.to_string(), page: String::new(), installer: None })),
             "attention" => {
                 if let Some(id) = self.tabs.first().map(|t| t.focus) {
                     self.attention.insert(id);
@@ -1768,7 +1768,8 @@ impl App {
                 }
                 UpdateUi::UpToDate => draw_update(r, theme, "You're up to date", &format!("Stećak {current} is the latest version"), None, "OK"),
                 UpdateUi::Installing(v) => draw_update(r, theme, &format!("Updating to {v}…"), "Downloading and verifying the release", None, "Hide"),
-                UpdateUi::Ready(_) => draw_update(r, theme, "Update installed", "Restart Stećak to use the new version", Some("Restart"), "Later"),
+                // Windows installs on Restart (a running exe can't be replaced); macOS already has.
+                UpdateUi::Ready(_) => draw_update(r, theme, if cfg!(windows) { "Update ready" } else { "Update installed" }, "Restart Stećak to use the new version", Some("Restart"), "Later"),
                 UpdateUi::Failed(e, _) => draw_update(r, theme, "Update failed", e, Some("Download page"), "Close"),
             }
         });
