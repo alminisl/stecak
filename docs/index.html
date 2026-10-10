@@ -131,7 +131,7 @@
   .val b { color: var(--ink); font-weight: 600; }
   .row:hover .bar, .row:focus-visible .bar { filter: brightness(1.15); }
   .row:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; border-radius: 6px; }
-  details { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  details { margin-top: 10px; font-size: 14px; color: var(--muted); overflow-x: auto; }
   details summary { cursor: pointer; }
   details table { border-collapse: collapse; width: 100%; margin-top: 10px; font-family: "JetBrains Mono", monospace; font-size: 13px; color: #d5d3cd; }
   details th, details td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -155,6 +155,7 @@
     .stats, .facts { grid-template-columns: 1fr; }
     .two { grid-template-columns: 1fr; gap: 32px; }
     .features { grid-template-columns: 1fr; }
+    .heritage::before { background-size: 240px 240px; }
     section { padding: 64px 0; }
   }
 </style>
