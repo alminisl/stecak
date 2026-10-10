@@ -128,32 +128,40 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>, cfg: &Config) -> Renderer {
-        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(display);
-        // On Windows, composition-based swapchains are what make per-pixel alpha possible (the
-        // same approach as Windows Terminal's AtlasEngine). Only DX12 offers that: Vulkan
-        // swapchains on Windows are opaque, and wgpu may pick Vulkan first, so prefer DX12 unless
-        // WGPU_BACKEND says otherwise.
-        desc.backend_options.dx12.presentation_system = wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual;
-        let instance = wgpu::Instance::new(desc);
-        let surface = instance.create_surface(window.clone()).expect("create surface");
-        let dx12 = if cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
-            let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12));
-            let supported = adapters.into_iter().filter(|a| a.is_surface_supported(&surface));
-            // Same preference as below: integrated over discrete when both can draw.
-            supported.min_by_key(|a| a.get_info().device_type != wgpu::DeviceType::IntegratedGpu)
-        } else {
-            None
-        };
-        let adapter = dx12.unwrap_or_else(|| {
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+    pub fn new(window: Arc<Window>, display: winit::event_loop::OwnedDisplayHandle, cfg: &Config) -> Renderer {
+        let connect = |backends: Option<wgpu::Backends>| {
+            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display.clone()));
+            // On Windows, composition-based swapchains are what make per-pixel alpha possible
+            // (the same approach as Windows Terminal's AtlasEngine).
+            desc.backend_options.dx12.presentation_system = wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual;
+            if let Some(backends) = backends {
+                desc.backends = backends;
+            }
+            let instance = wgpu::Instance::new(desc);
+            let surface = instance.create_surface(window.clone()).expect("create surface");
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
             }))
-            .expect("no GPU adapter")
-        });
+            .ok();
+            (surface, adapter)
+        };
+        // Windows: DX12 only, unless WGPU_BACKEND says otherwise. Only DX12 has the composition
+        // swapchain (Vulkan swapchains there are opaque), and starting Vulkan as well loads the
+        // GPU's Vulkan driver and overlay layers into the process (~100 MB) for nothing.
+        // A DX12 surface without an adapter is dropped here, before the fallback makes another.
+        let dx12 = (cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none())
+            .then(|| connect(Some(wgpu::Backends::DX12)))
+            .and_then(|(surface, adapter)| Some((surface, adapter?)));
+        let (surface, adapter) = match dx12 {
+            Some(found) => found,
+            None => match connect(None) {
+                (surface, Some(adapter)) => (surface, adapter),
+                (_, None) => panic!("no GPU adapter"),
+            },
+        };
         log::info!("GPU adapter: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,

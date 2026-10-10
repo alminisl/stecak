@@ -13,6 +13,8 @@
 #ifndef Exe
   #define Exe "target\release\stecak.exe"
 #endif
+; scripts/fetch-conpty.ps1 puts conpty.dll and OpenConsole.exe next to the exe.
+#define ExeDir ExtractFilePath(Exe)
 
 [Setup]
 AppId={{5B7C3E52-8A0D-4C1B-9F3E-57ECAC0A1D2E}
@@ -55,6 +57,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#Exe}"; DestDir: "{app}"; DestName: "stecak.exe"; Flags: ignoreversion
+Source: "{#ExeDir}conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ExeDir}OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.example.yaml"; DestDir: "{app}"; Flags: ignoreversion

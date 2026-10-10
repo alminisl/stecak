@@ -69,10 +69,11 @@ jobs:
           choco install innosetup --no-progress -y
           $version = "$env:GITHUB_REF_NAME".TrimStart('v')
           $exe = "target/${{ matrix.target }}/release/stecak.exe"
+          ./scripts/fetch-conpty.ps1 -Arch ${{ matrix.arch }} -Dest (Split-Path $exe)
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" "/DArch=${{ matrix.arch }}" "/DExe=$($exe -replace '/', '\')" installer\stecak.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force dist/stecak | Out-Null
-          Copy-Item $exe, README.md, LICENSE, config.example.yaml dist/stecak/
+          Copy-Item $exe, "$(Split-Path $exe)/conpty.dll", "$(Split-Path $exe)/OpenConsole.exe", README.md, LICENSE, config.example.yaml dist/stecak/
           Compress-Archive -Path dist/stecak/* -DestinationPath "dist/stecak-$env:GITHUB_REF_NAME-windows-${{ matrix.arch }}.zip"
       - uses: softprops/action-gh-release@v2
         with:
