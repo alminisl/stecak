@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Stećak — a terminal carved to last</title>
+<title>Stećak, a terminal carved to last</title>
 <meta name="description" content="Stećak is a fast, lightweight GPU terminal emulator written in Rust, named after the medieval tombstones of Bosnia and Herzegovina.">
-<meta property="og:title" content="Stećak — a terminal carved to last">
+<meta property="og:title" content="Stećak, a terminal carved to last">
 <meta property="og:description" content="A fast, lightweight GPU terminal emulator, named after the medieval stećci of Bosnia and Herzegovina.">
 <meta property="og:image" content="img/radimlja.jpg">
 <link rel="icon" href="img/icon.png">
@@ -76,7 +76,14 @@
   .features li::before { content: "◆"; position: absolute; left: 0; color: var(--amber); font-size: 12px; top: 6px; }
 
   /* Heritage: limestone section */
-  .heritage { background: var(--stone); color: #22201b; }
+  .heritage { background: var(--stone); color: #22201b; position: relative; overflow: hidden; }
+  /* Bosnian ćilim motif, drifting slower than the page (--py set by the scroll script). */
+  .heritage::before {
+    content: ""; position: absolute; inset: -100% 0; opacity: .1; pointer-events: none;
+    background: url("img/cilim.svg") center / 160px 160px;
+    transform: translate3d(0, var(--py, 0px), 0);
+  }
+  .heritage > .wrap { position: relative; }
   .heritage a { color: #8a4b12; }
   .heritage .lead { font-size: 21px; max-width: 760px; }
   .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 40px 0; }
@@ -160,7 +167,7 @@
     <h1>Stećak</h1>
     <p class="lede">A fast, lightweight GPU terminal emulator, named after the medieval stone monuments of Bosnia and Herzegovina, carved to last.</p>
     <div class="buttons">
-      <a class="btn primary" href="https://github.com/alminisl/stecak/releases/latest">Download for macOS (.dmg)</a>
+      <a class="btn primary" href="https://github.com/alminisl/stecak/releases/latest">Download for macOS &amp; Windows</a>
       <a class="btn ghost" href="https://github.com/alminisl/stecak">View on GitHub</a>
       <a class="btn ghost" href="#agents">For AI agents</a>
       <a class="btn ghost" href="#benchmarks">Benchmarks</a>
@@ -195,6 +202,11 @@
           <li>Transparency and background blur</li>
           <li>Background images, like iTerm2</li>
           <li>Settings page and live-reloading config</li>
+          <li>Command palette: every action, theme and font</li>
+          <li>⌘-click <span class="mono">file:line</span> to open it in your editor</li>
+          <li>Tabs, splits and folders come back at launch</li>
+          <li>Checks for updates and updates in place</li>
+          <li>Native on Windows: installer, acrylic blur, PowerShell</li>
           <li>Built for Claude Code and Codex</li>
         </ul>
       </div>
@@ -225,8 +237,18 @@
         <div>
           <h3>Session browser</h3>
           <p>Press <span class="mono">⌘⇧S</span> to see every saved Claude Code and Codex session, newest first, with a dot on the live ones. Type to search by prompt, folder or branch. Enter or a click resumes the session in a new tab, right where it was.</p>
+          <p>Close the window and nothing is lost: at the next launch every tab and split reopens in its folder, with the exact Claude Code conversation that was running there.</p>
         </div>
       </div>
+      <h3 style="margin-top:56px">Your agent, one keystroke away</h3>
+      <ul class="features">
+        <li><b>Ask for a command (⌘I).</b> Describe it in words; the command is typed at your prompt for you to check. It's never run for you.</li>
+        <li><b>Explain the last error (⌘⇧E).</b> The command, its exit code and its output go to your agent, which explains what went wrong.</li>
+        <li><b>Send a selection (⌘⇧L).</b> Paste selected text, or the last command and its output, into the agent as context.</li>
+        <li><b>Context bar.</b> A bar under Claude Code fills as its context window does, colored by what's in it, with the auto-compact point marked.</li>
+        <li><b>Paste images.</b> ⌘V with a screenshot on the clipboard sends it straight to Claude Code or Codex.</li>
+        <li><b>No API keys.</b> Everything runs through the <span class="mono">claude</span> or <span class="mono">codex</span> you already have.</li>
+      </ul>
     </div>
   </section>
 
@@ -331,11 +353,13 @@
       <h3>macOS</h3>
       <p>Download the <a href="https://github.com/alminisl/stecak/releases/latest">latest .dmg</a> and drag Stećak to Applications. The app isn't notarized yet, so the first time, right-click it and choose <b>Open</b>, or run:</p>
       <pre>xattr -dr com.apple.quarantine "/Applications/Stećak.app"</pre>
+      <h3>Windows 10/11</h3>
+      <p>Download <span class="mono">stecak-v&lt;version&gt;-windows-x64-setup.exe</span> (or <span class="mono">-arm64-</span> for Snapdragon PCs) from the <a href="https://github.com/alminisl/stecak/releases/latest">latest release</a> and run it. It installs for your user only, with no admin prompt, and can put <span class="mono">stecak</span> on your PATH. A portable .zip is there too. The installer isn't code-signed yet, so if SmartScreen warns, choose <b>More info › Run anyway</b>.</p>
       <h3>From source (macOS, Linux)</h3>
       <pre>curl -fsSL https://raw.githubusercontent.com/alminisl/stecak/main/install.sh | sh</pre>
       <h3>Anywhere with Cargo, including Windows</h3>
       <pre>cargo install --git https://github.com/alminisl/stecak</pre>
-      <p class="note">Stećak is alpha software. It's a daily driver on macOS; Windows and Linux build in CI but haven't been used day to day yet.</p>
+      <p class="note">Stećak is alpha software. It's a daily driver on macOS and now in use on Windows. Linux builds in CI but hasn't been used day to day yet. Stećak checks for new releases at launch and can update itself in place.</p>
     </div>
   </section>
 </main>
@@ -359,6 +383,15 @@
     el.addEventListener("focus", () => { const r = el.getBoundingClientRect(); show(el, r.left + 120, r.top); });
     el.addEventListener("blur", () => tip.style.opacity = 0);
   });
+
+  // Ćilim parallax: the motif moves at 30% of scroll speed relative to its section.
+  if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const kilims = document.querySelectorAll(".heritage");
+    let queued = false;
+    const move = () => { queued = false; kilims.forEach(s => s.style.setProperty("--py", (s.getBoundingClientRect().top * -0.3).toFixed(1) + "px")); };
+    addEventListener("scroll", () => { if (!queued) { queued = true; requestAnimationFrame(move); } }, { passive: true });
+    move();
+  }
 </script>
 </body>
 </html>
