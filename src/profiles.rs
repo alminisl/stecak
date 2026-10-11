@@ -30,7 +30,7 @@ fn detected() -> &'static [Profile] {
 }
 
 fn profile(name: &str, program: impl Into<String>, args: &[&str]) -> Profile {
-    Profile { name: name.into(), program: program.into(), args: args.iter().map(|a| a.to_string()).collect() }
+    Profile { name: name.into(), program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), cwd: None }
 }
 
 #[cfg(windows)]

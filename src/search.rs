@@ -15,13 +15,24 @@ pub struct Search {
     regex: Option<RegexSearch>,
     pub current: Option<Match>,
     pub no_match: bool,
+    /// Alt+R: the query is a regular expression. Kept between searches.
+    pub use_regex: bool,
+    /// Alt+C: match case exactly; off = smartcase. Kept between searches.
+    pub match_case: bool,
+    /// The query isn't a valid regular expression.
+    pub bad_regex: bool,
 }
 
-/// Plain-text, case-insensitive (unless the query has uppercase, like vim's smartcase).
-fn pattern(query: &str) -> String {
+/// The query as a regex: escaped unless `regex`; case-insensitive unless `match_case` or the
+/// query has uppercase (like vim's smartcase).
+fn pattern(query: &str, regex: bool, match_case: bool) -> String {
     let mut p = String::new();
-    if !query.chars().any(char::is_uppercase) {
+    if !match_case && !query.chars().any(char::is_uppercase) {
         p.push_str("(?i)");
+    }
+    if regex {
+        p.push_str(query);
+        return p;
     }
     for c in query.chars() {
         if "\\.+*?()|[]{}^$#&-~".contains(c) {
@@ -39,12 +50,24 @@ impl Search {
     }
 
     pub fn close(&mut self) {
-        *self = Search::default();
+        *self = Search { use_regex: self.use_regex, match_case: self.match_case, ..Search::default() };
+    }
+
+    /// Flip a toggle and search again with it.
+    pub fn toggle(&mut self, regex: bool, term: &mut Term<Listener>) {
+        if regex {
+            self.use_regex = !self.use_regex;
+        } else {
+            self.match_case = !self.match_case;
+        }
+        let query = std::mem::take(&mut self.query);
+        self.set_query(query, term);
     }
 
     pub fn set_query(&mut self, query: String, term: &mut Term<Listener>) {
         self.query = query;
-        self.regex = if self.query.is_empty() { None } else { RegexSearch::new(&pattern(&self.query)).ok() };
+        self.regex = if self.query.is_empty() { None } else { RegexSearch::new(&pattern(&self.query, self.use_regex, self.match_case)).ok() };
+        self.bad_regex = !self.query.is_empty() && self.regex.is_none();
         self.current = None;
         // Re-search from the bottom of the screen so typing jumps to the nearest match.
         self.step(term, Direction::Left);
@@ -107,7 +130,9 @@ mod tests {
 
     #[test]
     fn smartcase_and_escaping() {
-        assert_eq!(pattern("a.b"), "(?i)a\\.b");
-        assert_eq!(pattern("Foo"), "Foo");
+        assert_eq!(pattern("a.b", false, false), "(?i)a\\.b");
+        assert_eq!(pattern("Foo", false, false), "Foo");
+        assert_eq!(pattern("err(or)?", true, false), "(?i)err(or)?");
+        assert_eq!(pattern("warn", false, true), "warn");
     }
 }

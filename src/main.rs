@@ -19,8 +19,19 @@ mod context;
 mod draw;
 mod input;
 mod layout;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
+// shortcut: no popup menus on Linux (muda needs GTK there); add them if Linux users ask.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod menu {
+    #[allow(dead_code)]
+    pub enum Row<'a> {
+        Item(&'a str, &'a str),
+        Sep,
+        Sub(&'a str, Vec<(String, String)>),
+    }
+    pub fn popup(_: &winit::window::Window, _: &[Row], _: (f32, f32)) {}
+}
 mod mouse;
 mod palette;
 mod pane;
@@ -42,13 +53,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, UserAttentionType, Window, WindowId};
@@ -93,7 +105,18 @@ impl Tab {
     }
 }
 
+/// Cursor blink half-period (xterm and Windows Terminal use 530 ms) and how long it blinks
+/// after the last key press.
+const BLINK: Duration = Duration::from_millis(530);
+const BLINK_FOR: Duration = Duration::from_secs(10);
+/// Visual bell fade-out, in seconds.
+const FLASH: f32 = 0.15;
+
 /// Colors offered for tabs: (name, index into the theme's ANSI palette).
+/// Screen readers get the screen text at most this often (fast output would flood them).
+const ACCESS_EVERY: Duration = Duration::from_millis(250);
+/// Width of the "▾" profile button right of "+", in cells.
+const PROFILES_W: f32 = 1.5;
 const TAB_COLORS: [(&str, usize); 6] = [("Red", 1), ("Green", 2), ("Yellow", 3), ("Blue", 4), ("Magenta", 5), ("Cyan", 6)];
 
 /// The Claude Code session the context bar is showing.
@@ -188,6 +211,19 @@ struct App {
     /// A newer release to offer: (version, release page URL), and where its buttons were drawn.
     update: Option<UpdateUi>,
     update_buttons: Option<(Rect, Rect)>,
+    /// Clipboard text waiting for "Paste N lines?" to be confirmed, and that popup's buttons.
+    paste_confirm: Option<String>,
+    paste_buttons: Option<(Rect, Rect)>,
+    /// Last key press: the cursor blink restarts from it, and stops 10 s after it.
+    last_key: Instant,
+    /// Visual bell: the pane that rang and when.
+    flash: Option<(PaneId, Instant)>,
+    /// Screen reader bridge; it does nothing until an assistive tool connects (`access_on`).
+    access: Option<accesskit_winit::Adapter>,
+    access_on: bool,
+    /// The screen changed since the last tree sent, and when that was (updates are throttled).
+    access_dirty: bool,
+    access_at: Instant,
     /// Keyboard shortcut legend (⌘/) is showing.
     help_open: bool,
     /// Tab under the mouse (shows its close ×).
@@ -272,6 +308,14 @@ impl App {
             last_notified: HashMap::new(),
             update: None,
             update_buttons: None,
+            paste_confirm: None,
+            paste_buttons: None,
+            last_key: Instant::now(),
+            flash: None,
+            access: None,
+            access_on: false,
+            access_dirty: false,
+            access_at: Instant::now(),
             help_open: false,
             atlas_retry: false,
             #[cfg(target_os = "macos")]
@@ -542,6 +586,22 @@ impl App {
         }
     }
 
+    /// When the blinking cursor next changes, if it's blinking.
+    fn next_blink(&self, now: Instant) -> Option<Instant> {
+        let since = now.duration_since(self.last_key);
+        if !self.config.cursor_blink || !self.focused || since >= BLINK_FOR {
+            return None;
+        }
+        let n = since.as_millis() / BLINK.as_millis() + 1;
+        Some(self.last_key + BLINK * n as u32)
+    }
+
+    /// Whether the focused cursor is in the visible half of its blink (always, without blinking).
+    fn cursor_on(&self) -> bool {
+        let since = self.last_key.elapsed();
+        !self.config.cursor_blink || since >= BLINK_FOR || (since.as_millis() / BLINK.as_millis()) % 2 == 0
+    }
+
     fn copy(&self) {
         let Some(pane) = self.focused_pane() else { return };
         if let Some(text) = pane.term.lock().selection_to_string() {
@@ -549,6 +609,24 @@ impl App {
                 let _ = c.set_text(text);
             }
         }
+    }
+
+    /// Paste from the clipboard, asking first when it would run several commands at once.
+    fn paste_checked(&mut self, text: String) {
+        let bracketed = self.focused_pane().is_some_and(|p| p.term.lock().mode().contains(TermMode::BRACKETED_PASTE));
+        if self.config.paste_warning && !bracketed && paste_needs_confirm(&text) {
+            self.paste_confirm = Some(text);
+            self.mark_dirty();
+        } else {
+            self.paste_text(&text);
+        }
+    }
+
+    fn confirm_paste(&mut self, yes: bool) {
+        if let Some(text) = self.paste_confirm.take().filter(|_| yes) {
+            self.paste_text(&text);
+        }
+        self.mark_dirty();
     }
 
     fn paste_text(&self, text: &str) {
@@ -915,6 +993,11 @@ impl App {
                     }
                 }
             }
+            Action::ToggleFullscreen => {
+                if let Some(w) = &self.window {
+                    w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(winit::window::Fullscreen::Borderless(None)) });
+                }
+            }
             Action::ZoomPane => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     let mut ids = vec![];
@@ -937,7 +1020,7 @@ impl App {
             }
             Action::Copy => self.copy(),
             Action::Paste => match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                Ok(text) if !text.is_empty() => self.paste_text(&text),
+                Ok(text) if !text.is_empty() => self.paste_checked(text),
                 // No text (e.g. a screenshot): agents read images from the clipboard themselves
                 // when they get Ctrl+V, the key Claude Code and Codex use for pasting images.
                 _ => {
@@ -990,6 +1073,64 @@ impl App {
     }
 
     /// A menu bar item: map its id onto the same actions the shortcuts use.
+    /// Send the screen reader a window holding one terminal node: the focused pane's screen.
+    // shortcut: whole screen as the node's value, no text ranges or caret; add text runs if
+    // screen reader users need character/word navigation.
+    fn access_update(&mut self) {
+        use accesskit::{Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+        self.access_dirty = false;
+        self.access_at = Instant::now();
+        let (window, terminal) = (NodeId(0), NodeId(1));
+        let pane = self.focused_pane();
+        let mut term = Node::new(Role::Terminal);
+        if let Some(p) = pane {
+            term.set_label(p.display_title());
+            term.set_value(mouse::screen_text(&p.term.lock()));
+        }
+        let mut win = Node::new(Role::Window);
+        win.set_label(self.window_title.clone());
+        win.set_children(vec![terminal]);
+        let update = TreeUpdate { nodes: vec![(window, win), (terminal, term)], tree: Some(TreeInfo::new(window)), tree_id: TreeId::ROOT, focus: terminal };
+        if let Some(a) = self.access.as_mut() {
+            a.update_if_active(|| update);
+        }
+    }
+
+    /// Right-click menu in a pane.
+    fn pane_menu(&mut self) {
+        use menu::Row::*;
+        let has_sel = self.focused_pane().is_some_and(|p| p.term.lock().selection.as_ref().is_some_and(|s| !s.is_empty()));
+        let mut rows = vec![];
+        if has_sel {
+            rows.push(Item("copy", "Copy"));
+        }
+        rows.extend([Item("paste", "Paste"), Sep, Item("split-right", "Split Right"), Item("split-down", "Split Down"), Item("zoom-pane", "Zoom Pane")]);
+        rows.extend([Item("duplicate-tab", "Duplicate Tab"), Sep, Item("find", "Find…"), Item("clear", "Clear Scrollback"), Sep, Item("close", "Close Pane")]);
+        self.popup(&rows);
+    }
+
+    /// Right-click menu on the active tab.
+    fn tab_menu(&mut self) {
+        use menu::Row::*;
+        let mut colors: Vec<_> = TAB_COLORS.iter().map(|(name, i)| (format!("tab-color:{i}"), name.to_string())).collect();
+        colors.push(("tab-color:none".into(), "None".into()));
+        self.popup(&[Item("rename-tab", "Rename Tab"), Item("duplicate-tab", "Duplicate Tab"), Sub("Tab Color", colors), Sep, Item("close-tab", "Close Tab")]);
+    }
+
+    /// The "▾" menu: open a new tab with any profile.
+    fn profiles_menu(&mut self) {
+        let ids: Vec<_> = profiles::all(&self.config).into_iter().map(|p| (format!("profile:{}", p.name), p.name)).collect();
+        let rows: Vec<_> = ids.iter().map(|(id, name)| menu::Row::Item(id, name)).collect();
+        self.popup(&rows);
+    }
+
+    fn popup(&mut self, rows: &[menu::Row]) {
+        self.draw(); // show the click's effect (focus, active tab) before the menu's modal loop
+        if let Some(w) = &self.window {
+            menu::popup(w, rows, self.mouse);
+        }
+    }
+
     fn menu_action(&mut self, id: &str, event_loop: &ActiveEventLoop) {
         let action = match id {
             "check-updates" => return update::check_async(self.proxy.clone(), true),
@@ -1023,7 +1164,20 @@ impl App {
             "explain-error" => Action::ExplainError,
             "send-to-agent" => Action::SendToAgent,
             "zoom-pane" => Action::ZoomPane,
+            "fullscreen" => Action::ToggleFullscreen,
             "rename-tab" => return self.start_rename(self.active),
+            "close-tab" => {
+                let mut ids = vec![];
+                self.tabs[self.active].root.leaves(&mut ids);
+                for id in ids {
+                    self.close_pane(id, event_loop);
+                }
+                return;
+            }
+            "duplicate-tab" => {
+                let shell = self.focused_pane().map(|p| p.shell.clone());
+                return self.open_tab_with(None, None, shell);
+            }
             #[cfg(windows)]
             "admin-window" => return self.open_admin_window(),
             _ => {
@@ -1040,8 +1194,13 @@ impl App {
                     cfg.font.family.retain(|f| f != family);
                     cfg.font.family.insert(0, family.to_string());
                 } else if let Some(name) = id.strip_prefix("profile:") {
-                    let shell = profiles::find(&cfg, name);
-                    self.open_tab_with(None, None, shell);
+                    let profile = profiles::all(&cfg).into_iter().find(|p| p.name == name);
+                    let home = |p: PathBuf| match p.strip_prefix("~") {
+                        Ok(rest) => dirs::home_dir().map_or(p.clone(), |h| h.join(rest)),
+                        Err(_) => p,
+                    };
+                    let cwd = profile.as_ref().and_then(|p| p.cwd.clone()).map(home);
+                    self.open_tab_with(None, cwd, profile.map(|p| p.shell()));
                     return self.mark_dirty();
                 } else if let Some(name) = id.strip_prefix("default-profile:") {
                     cfg.default_profile = name.to_string();
@@ -1085,6 +1244,10 @@ impl App {
     /// A pane rang the bell or sent a notification (agents do this when they finish or need
     /// permission). Mark its tab, and if you're not looking at it, tell the OS.
     fn on_notify(&mut self, id: PaneId, msg: Option<String>) {
+        if self.config.visual_bell && msg.is_none() {
+            self.flash = Some((id, Instant::now()));
+            self.mark_dirty();
+        }
         let in_active_tab = self.tabs.get(self.active).is_some_and(|t| {
             let mut ids = vec![];
             t.root.leaves(&mut ids);
@@ -1208,6 +1371,14 @@ impl App {
             Key::Named(NamedKey::Backspace) => {
                 query.pop();
             }
+            // Alt+R regex, Alt+C match case (VS Code's toggles).
+            _ if self.modifiers.alt_key() && matches!(event.key_without_modifiers(), Key::Character(ref c) if c == "r" || c == "c") => {
+                let regex = matches!(event.key_without_modifiers(), Key::Character(ref c) if c == "r");
+                self.search.toggle(regex, &mut pane.term.lock());
+                self.search_gen += 1;
+                self.mark_dirty();
+                return true;
+            }
             _ => match &event.text {
                 Some(t) if !t.chars().any(char::is_control) => query.push_str(t),
                 _ => return false,
@@ -1257,7 +1428,8 @@ impl App {
             "pane" => self.cycle_pane(1),
             "goto" => self.handle_action(Action::SelectTab(arg.parse().unwrap_or(0)), event_loop),
             "type" => self.handle_action(Action::Write(arg.replace("\\n", "\r").into_bytes()), event_loop),
-            "find" => {
+            "find" | "find-re" => {
+                self.search.use_regex = cmd == "find-re";
                 self.handle_action(Action::Find, event_loop);
                 if let Some(p) = self.panes.get(&self.search.pane) {
                     self.search.set_query(arg.to_string(), &mut p.term.lock());
@@ -1272,6 +1444,20 @@ impl App {
             "help" => self.help_open = true,
             // Any menu / palette id, e.g. "action:zoom-pane" or "action:tab-color:2".
             "action" => self.menu_action(arg, event_loop),
+            "scroll" => {
+                if let Some(p) = self.focused_pane() {
+                    p.term.lock().scroll_display(Scroll::Delta(arg.parse().unwrap_or(10)));
+                }
+            }
+            // Popups are modal: a test run can only screenshot them, then kill the process.
+            "menu" => {
+                self.mouse = (200.0, 200.0);
+                match arg {
+                    "tab" => self.tab_menu(),
+                    "profiles" => self.profiles_menu(),
+                    _ => self.pane_menu(),
+                }
+            }
             "palette" => {
                 self.open_palette();
                 self.palette.query = arg.to_string();
@@ -1313,7 +1499,6 @@ impl App {
                 let statuses = self.statuses();
                 log::info!("dump tabs: active={} statuses={statuses:?}", self.active);
                 if let Some(c) = &self.context {
-                    use alacritty_terminal::grid::Dimensions;
                     let b = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
                     let rows = self.focused_id().and_then(|id| self.panes.get(&id)).map(|p| p.term.lock().screen_lines());
                     log::info!("dump context: session={} used={:?} rows={rows:?} breakdown={:?}", c.session, c.used, b.map(|b| b.rows(c.used.as_ref().map_or(b.overhead(), |u| u.0))));
@@ -1445,6 +1630,11 @@ impl App {
             self.mark_dirty();
             return;
         }
+        if let Some((primary, secondary)) = self.paste_buttons.filter(|_| self.paste_confirm.is_some()) {
+            if primary.contains(x, y) || secondary.contains(x, y) {
+                return self.confirm_paste(primary.contains(x, y));
+            }
+        }
         if let Some((primary, secondary)) = self.update_buttons {
             if primary.contains(x, y) || secondary.contains(x, y) {
                 return self.update_action(primary.contains(x, y), event_loop);
@@ -1484,8 +1674,8 @@ impl App {
             return;
         }
         if y < self.tab_bar_h() {
-            if button == MouseButton::Left && y >= self.titlebar_h() {
-                self.on_tab_bar_click(x, event_loop);
+            if y >= self.titlebar_h() {
+                self.on_tab_bar_click(x, button, event_loop);
             }
             return;
         }
@@ -1505,6 +1695,10 @@ impl App {
                 self.open_link(link);
                 return;
             }
+        }
+        // Programs that use the mouse get the right-click; Shift+right-click still opens the menu.
+        if button == MouseButton::Right && (self.modifiers.shift_key() || !self.wants_mouse(g.id)) {
+            return self.pane_menu();
         }
         let mbutton = match button {
             MouseButton::Left => mouse::Button::Left,
@@ -1566,6 +1760,13 @@ impl App {
                     let mut term = p.term.lock();
                     if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
                         term.selection = None;
+                    }
+                    if self.config.copy_on_select {
+                        if let Some(text) = term.selection_to_string().filter(|t| !t.is_empty()) {
+                            if let Ok(mut c) = arboard::Clipboard::new() {
+                                let _ = c.set_text(text);
+                            }
+                        }
                     }
                 }
                 self.mark_dirty();
@@ -1649,16 +1850,32 @@ impl App {
         }
     }
 
-    fn on_tab_bar_click(&mut self, x: f32, event_loop: &ActiveEventLoop) {
+    fn on_tab_bar_click(&mut self, x: f32, button: MouseButton, event_loop: &ActiveEventLoop) {
         let (win_w, _) = self.r().size();
         let plus_w = self.tab_bar_h() - self.titlebar_h();
+        let tab_w = ((win_w - plus_w) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
+        let plus_x = tab_w * self.tabs.len() as f32;
+        // "▾" right of "+" (or right-clicking "+") lists the profiles.
+        if x >= plus_x && x < plus_x + plus_w + PROFILES_W * self.r().cell().0 && (button == MouseButton::Right || x >= plus_x + plus_w) {
+            return self.profiles_menu();
+        }
+        if button == MouseButton::Right {
+            if (x / tab_w) < self.tabs.len() as f32 {
+                self.active = (x / tab_w) as usize;
+                self.mark_dirty();
+                self.tab_menu();
+            }
+            return;
+        }
+        if button != MouseButton::Left {
+            return;
+        }
         if x >= win_w - plus_w {
             // ⚙ at the far right: settings (where the config file and shortcuts are).
             self.settings.toggle();
             self.mark_dirty();
             return;
         }
-        let tab_w = ((win_w - plus_w) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
         let idx = (x / tab_w) as usize;
         if idx < self.tabs.len() {
             // The × sits in the last two cells of the tab.
@@ -1731,6 +1948,8 @@ impl App {
 
     fn draw(&mut self) {
         let t0 = Instant::now();
+        // Anything worth redrawing may have changed the text a screen reader sees.
+        self.access_dirty |= self.access_on;
         self.poll_context();
         let atlas_gen = self.r().atlas_gen();
         // Output arriving from now on needs another frame.
@@ -1767,6 +1986,7 @@ impl App {
             return;
         }
 
+        let cursor_on = self.cursor_on();
         let App { renderer, panes, caches, theme, search, tabs, config, .. } = self;
         let r = renderer.as_mut().unwrap();
         let (cw, ch) = r.cell();
@@ -1812,8 +2032,20 @@ impl App {
                     sixel::draw(r, &term, &images, g.gx, g.gy, g.cols, g.rows);
                 }
             }
-            draw::draw_cursor(r, &term, theme, g.gx, g.gy, self.focused && is_focus);
+            if !(self.focused && is_focus && !cursor_on) {
+                draw::draw_cursor(r, &term, theme, g.gx, g.gy, self.focused && is_focus);
+            }
+            let (offset, history) = (term.grid().display_offset() as f32, term.grid().history_size() as f32);
             drop(term);
+            if offset > 0.0 {
+                // Scrolled back: a thin thumb on the right edge shows where in the history this is.
+                let h = (g.rect.h * g.rows as f32 / (history + g.rows as f32)).max(r.cell().1);
+                let y = g.rect.y + (g.rect.h - h) * (1.0 - offset / history);
+                r.rect(g.rect.x + g.rect.w - 4.0 * r.scale, y, 3.0 * r.scale, h, rgba(theme.fg, 0.4));
+            }
+            if let Some(t) = self.flash.filter(|f| f.0 == g.id).map(|f| f.1.elapsed().as_secs_f32()).filter(|&t| t < FLASH) {
+                r.rect(g.rect.x, g.rect.y, g.rect.w, g.rect.h, rgba(theme.fg, 0.18 * (1.0 - t / FLASH)));
+            }
             if multi && !is_focus {
                 // Dim unfocused splits slightly.
                 r.rect(g.rect.x, g.rect.y, g.rect.w, g.rect.h, rgba(theme.bg, 0.35));
@@ -1915,6 +2147,9 @@ impl App {
             }
             let plus_x = tab_w * tabs.len() as f32;
             r.text("+", plus_x + (plus_w - cw) / 2.0, text_y, plus_x + plus_w, rgba(theme.fg, 0.7));
+            if cfg!(not(target_os = "linux")) {
+                r.text("▾", plus_x + plus_w - cw * 0.25, text_y, plus_x + plus_w + PROFILES_W * cw, rgba(theme.fg, 0.5));
+            }
             let gear_x = win_w - plus_w;
             r.text("⚙", gear_x + (plus_w - cw) / 2.0, text_y, win_w, rgba(theme.fg, 0.6));
         }
@@ -1932,6 +2167,12 @@ impl App {
                 UpdateUi::Ready(_) => draw_update(r, theme, if cfg!(windows) { "Update ready" } else { "Update installed" }, "Restart Stećak to use the new version", Some("Restart"), "Later"),
                 UpdateUi::Failed(e, _) => draw_update(r, theme, "Update failed", e, Some("Download page"), "Close"),
             }
+        });
+        self.paste_buttons = self.paste_confirm.as_deref().and_then(|text| {
+            let lines = text.trim_end_matches(['\r', '\n']).lines().count();
+            let title = if lines > 1 { format!("Paste {lines} lines? Each runs as you paste it") } else { format!("Paste {} KB?", text.len() / 1024) };
+            let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+            draw_update(r, theme, &title, first.trim(), Some("Paste"), "Cancel")
         });
         self.sessions_layout = None;
         if self.sessions.open {
@@ -2084,8 +2325,22 @@ fn draw_search_bar(r: &mut Renderer, theme: &Theme, search: &Search, g: &PaneGeo
     let y = g.rect.y + g.rect.h - h;
     r.rect(g.rect.x, y, g.rect.w, h, rgba(theme.tab_bar, 0.95));
     r.rect(g.rect.x, y, g.rect.w, r.scale.max(1.0), rgba(theme.palette[4], 1.0));
+    // Toggles at the right edge, lit when on.
+    let mut right = g.rect.x + g.rect.w - cw;
+    let (case, regex) = if cfg!(target_os = "macos") { ("Aa ⌥C", ".* ⌥R") } else { ("Aa Alt+C", ".* Alt+R") };
+    for (label, on) in [(case, search.match_case), (regex, search.use_regex)] {
+        let w = (label.chars().count() as f32 + 2.0) * cw;
+        right -= w;
+        let ty = y + ((h - ch) / 2.0).round();
+        if on {
+            r.rect(right, y + 2.0 * r.scale, w - cw * 0.5, h - 4.0 * r.scale, rgba(theme.palette[4], 0.35));
+        }
+        r.text(label, right + cw * 0.75, ty, right + w, rgba(theme.fg, if on { 1.0 } else { 0.45 }));
+    }
     let status = if search.query.is_empty() {
         "type to search · ⏎ older · ⇧⏎ newer · esc"
+    } else if search.bad_regex {
+        "invalid regex"
     } else if search.no_match {
         "no matches"
     } else {
@@ -2095,8 +2350,8 @@ fn draw_search_bar(r: &mut Renderer, theme: &Theme, search: &Search, g: &PaneGeo
     let text = format!("Find: {}▏", search.query);
     let end = r.text_end(&text, g.rect.x + cw, g.rect.x + g.rect.w - cw);
     r.text(&text, g.rect.x + cw, ty, g.rect.x + g.rect.w - cw, rgba(theme.fg, 1.0));
-    let color = if search.no_match { theme.palette[1] } else { theme.fg };
-    r.text(status, end + 2.0 * cw, ty, g.rect.x + g.rect.w - cw, rgba(color, 0.6));
+    let color = if search.no_match || search.bad_regex { theme.palette[1] } else { theme.fg };
+    r.text(status, end + 2.0 * cw, ty, right, rgba(color, 0.6));
 }
 
 /// Keyboard shortcut legend (⌘/).
@@ -2206,6 +2461,11 @@ fn draw_sessions(r: &mut Renderer, theme: &Theme, b: &browser::Browser) -> (Rect
 
 /// Paste into a pane the way ⌘V does (bracketed when the app asked for it, so a shell
 /// never runs pasted text by itself).
+/// Several lines (a trailing newline doesn't count) or over 5 KB, Windows Terminal's limits.
+fn paste_needs_confirm(text: &str) -> bool {
+    text.trim_end_matches(['\r', '\n']).contains('\n') || text.len() > 5 * 1024
+}
+
 fn paste_into(pane: &Pane, text: &str) {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
     let bracketed = pane.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
@@ -2464,11 +2724,30 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // ~15 fps tab animation only while an agent works; otherwise sleep until an event.
-        event_loop.set_control_flow(if self.animating && !self.occluded {
-            ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(66))
-        } else {
-            ControlFlow::Wait
-        });
+        // Sleep until the next event or the earliest timed redraw.
+        let now = Instant::now();
+        let mut wake: Option<Instant> = None;
+        let mut at = |t: Instant| wake = Some(wake.map_or(t, |w| w.min(t)));
+        if !self.occluded {
+            if self.animating {
+                at(now + Duration::from_millis(66));
+            }
+            if let Some(t) = self.next_blink(now) {
+                at(t);
+            }
+            if self.flash.is_some_and(|f| f.1.elapsed().as_secs_f32() < FLASH) {
+                at(now + Duration::from_millis(16));
+            }
+        }
+        if self.access_on && self.access_dirty {
+            let due = self.access_at + ACCESS_EVERY;
+            if now >= due {
+                self.access_update();
+            } else {
+                wake = Some(wake.map_or(due, |w| w.min(due)));
+            }
+        }
+        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -2515,6 +2794,8 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self._menu = Some(menu::install(self.proxy.clone()));
         }
+        #[cfg(windows)]
+        menu::forward_events(self.proxy.clone());
 
         if self.config.window.blur {
             apply_blur(&window, 20, theme::luma(self.theme.bg) < 0.5);
@@ -2559,6 +2840,8 @@ impl ApplicationHandler<UserEvent> for App {
             let y = mp.y + (ms.height as i32 - os.height as i32).max(0) / 2;
             window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
         }
+        // Must exist before the window is first shown.
+        self.access = Some(accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone()));
         window.set_visible(true);
 
         let restored = self.restoring_enabled() && self.restore_session();
@@ -2598,6 +2881,14 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
+            UserEvent::Access(e) => match e.window_event {
+                accesskit_winit::WindowEvent::InitialTreeRequested => {
+                    self.access_on = true;
+                    self.access_update();
+                }
+                accesskit_winit::WindowEvent::AccessibilityDeactivated => self.access_on = false,
+                accesskit_winit::WindowEvent::ActionRequested(_) => {}
+            },
             UserEvent::Exited(id) => self.close_pane(id, event_loop),
             UserEvent::ConfigChanged => match config::load_from(&self.config_path) {
                 Ok(cfg) if cfg != self.config => {
@@ -2658,6 +2949,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let (Some(a), Some(w)) = (self.access.as_mut(), self.window.as_ref()) {
+            a.process_event(w, &event);
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.save_session();
@@ -2696,10 +2990,20 @@ impl ApplicationHandler<UserEvent> for App {
             // While an IME is composing, keys belong to it; the result arrives as Ime::Commit.
             WindowEvent::KeyboardInput { .. } if !self.preedit.is_empty() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.last_key = Instant::now();
                 let app_mod = input::is_app_modifier(self.modifiers);
                 if self.help_open && !app_mod {
                     self.help_open = false;
                     self.mark_dirty();
+                    return;
+                }
+                // "Paste N lines?" is modal: ⏎ pastes, esc cancels, other keys do nothing.
+                if self.paste_confirm.is_some() && !app_mod {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Enter) => self.confirm_paste(true),
+                        Key::Named(NamedKey::Escape) => self.confirm_paste(false),
+                        _ => {}
+                    }
                     return;
                 }
                 // Update popup: ⏎ = its main action, esc = dismiss; every other key still types.
@@ -2764,8 +3068,10 @@ impl ApplicationHandler<UserEvent> for App {
                     cfg.background_image.path = path.display().to_string();
                     self.apply_and_save(cfg);
                 } else {
-                    // Like other terminals: dropping a file types its (quoted) path.
-                    self.paste_text(&format!("'{}' ", path.display().to_string().replace('\'', "'\\''")));
+                    // Like other terminals: dropping a file types its path, quoted for the
+                    // pane's shell.
+                    let program = self.focused_pane().map(|p| p.shell.program.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| shell::interactive(&self.shell_config()).0);
+                    self.paste_text(&format!("{} ", shell::quote_path(&program, &path.display().to_string())));
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -2913,4 +3219,15 @@ fn main() {
 
     let mut app = App::new(config, cli_shell, config_path, proxy);
     event_loop.run_app(&mut app).expect("event loop error");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn paste_confirmation_limits() {
+        assert!(!super::paste_needs_confirm("ls -la"));
+        assert!(!super::paste_needs_confirm("ls -la\r\n"));
+        assert!(super::paste_needs_confirm("cd /tmp\nrm -rf build"));
+        assert!(super::paste_needs_confirm(&"x".repeat(6000)));
+    }
 }

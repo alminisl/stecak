@@ -75,6 +75,23 @@ pub fn quote(s: &str) -> String {
     if cfg!(windows) { format!("'{}'", s.replace('\'', "''")) } else { format!("'{}'", s.replace('\'', "'\\''")) }
 }
 
+/// A dropped file's path, quoted for the shell `program` runs. In WSL, Windows paths become
+/// `/mnt/<drive>/…` (as in Windows Terminal).
+pub fn quote_path(program: &str, path: &str) -> String {
+    let posix = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    match program_stem(program).as_str() {
+        "pwsh" | "powershell" => format!("'{}'", path.replace('\'', "''")),
+        // cmd has no escape for `"`, but Windows paths can't contain one.
+        "cmd" => format!("\"{path}\""),
+        "wsl" | "bash" if cfg!(windows) && path.as_bytes().get(1) == Some(&b':') => {
+            let (drive, rest) = path.split_at(2);
+            let mount = if program_stem(program) == "wsl" { "/mnt/" } else { "/" };
+            posix(&format!("{mount}{}{}", drive[..1].to_ascii_lowercase(), rest.replace('\\', "/")))
+        }
+        _ => posix(path),
+    }
+}
+
 /// What to call the shell in prompts ("Reply with one … command").
 pub fn name() -> String {
     if cfg!(windows) {
@@ -226,6 +243,17 @@ mod tests {
         assert_eq!(quote_arg(r#"say "hi""#), r#""say \"hi\"""#);
         assert_eq!(quote_arg(r"C:\dir with space\"), r#""C:\dir with space\\""#);
         assert_eq!(quote_arg(r#"a\"b"#), r#""a\\\"b""#);
+    }
+
+    #[test]
+    fn quotes_dropped_paths_per_shell() {
+        assert_eq!(quote_path(r"C:\Program Files\PowerShell\7\pwsh.exe", r"C:\it's here\a.txt"), r"'C:\it''s here\a.txt'");
+        assert_eq!(quote_path(r"C:\WINDOWS\system32\cmd.exe", r"C:\My Files\a.txt"), r#""C:\My Files\a.txt""#);
+        assert_eq!(quote_path("/bin/zsh", "/tmp/it's"), r"'/tmp/it'\''s'");
+        if cfg!(windows) {
+            assert_eq!(quote_path(r"C:\WINDOWS\system32\wsl.exe", r"D:\src\x y.rs"), "'/mnt/d/src/x y.rs'");
+            assert_eq!(quote_path(r"C:\Program Files\Git\bin\bash.exe", r"C:\a\b"), "'/c/a/b'");
+        }
     }
 
     #[test]

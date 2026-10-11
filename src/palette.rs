@@ -40,6 +40,8 @@ const ACTIONS: &[(&str, &str, &str, &str)] = &[
     ("Split down", "⌘⇧D", "Ctrl+Shift+E", "split-down"),
     ("Close pane", "⌘W", "Ctrl+Shift+W", "close"),
     ("Zoom pane", "⌘⇧⏎", "Ctrl+Shift+Enter", "zoom-pane"),
+    ("Toggle fullscreen", "⌃⌘F", "F11", "fullscreen"),
+    ("Duplicate tab", "", "", "duplicate-tab"),
     ("Rename tab", "double-click", "double-click", "rename-tab"),
     ("New window as Administrator", "", "", "admin-window"),
     ("Next tab", "⌘⇧]", "Ctrl+Tab", "next-tab"),

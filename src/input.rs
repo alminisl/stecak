@@ -36,6 +36,7 @@ pub enum Action {
     /// Move the focused pane's divider (see `Node::nudge`).
     ResizePane(Dir, f32),
     ZoomPane,
+    ToggleFullscreen,
     Write(Vec<u8>),
 }
 
@@ -68,6 +69,8 @@ fn shortcut(event: &KeyEvent, m: ModifiersState) -> Option<Action> {
             NamedKey::ArrowDown if resize => return Some(Action::ResizePane(Dir::Vertical, step)),
             // Zoom the focused pane: Cmd+Shift+Enter (iTerm2), Ctrl+Shift+Enter elsewhere.
             NamedKey::Enter if is_app_modifier(m) && (m.shift_key() || !mac) => return Some(Action::ZoomPane),
+            // F11 like Windows Terminal; macOS uses the menu's Enter Full Screen (Ctrl+Cmd+F).
+            NamedKey::F11 if !mac && m.is_empty() => return Some(Action::ToggleFullscreen),
             _ => {}
         }
     }

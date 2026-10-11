@@ -125,7 +125,7 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | Shift+Enter (Ctrl+Shift+Enter elsewhere) | zoom the focused pane |
 | Shift+] / Shift+[, Ctrl+Tab, 1–9 | switch tab |
 | C / V | copy selection / paste (bracketed-paste aware) |
-| F, G / Shift+G | find in scrollback, next / previous match |
+| F, G / Shift+G | find in scrollback, next / previous match (Alt+R regex, Alt+C match case) |
 | K | clear scrollback |
 | = / - / 0 | font size bigger / smaller / reset |
 | Shift+A / Shift+S | agent split / session browser |
@@ -135,17 +135,23 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | , | settings page (⚙ in the tab bar too) |
 | / | keyboard shortcut legend |
 
-Alt+Shift+arrows (Cmd+Ctrl+arrows on macOS) resize splits, like Windows Terminal.
+Alt+Shift+arrows (Cmd+Ctrl+arrows on macOS) resize splits, like Windows Terminal. F11 toggles
+fullscreen on Windows and Linux.
 
 Tabs: double-click one to rename it, drag to reorder, and pick a color with **Tab color: …** in
 the command palette. Names and colors come back with the session. **New tab: …** in the palette
-opens any detected shell; **Default profile: …** makes it the default.
+opens any detected shell (so does **▾** next to **+**); **Default profile: …** makes it the default.
+Right-click a tab to rename, duplicate, color or close it.
 
 Mouse:
 - Drag to select; double-click selects a word, triple-click a line, Shift+click extends.
 - Cmd+click (Ctrl+click off macOS) opens a URL.
 - In apps that capture the mouse (vim, tmux, htop), hold Shift to select text instead.
-- Dropping a file types its path. Dropping an image while settings are open sets the background.
+- Right-click for copy, paste, splits, find and close (Shift+right-click inside mouse apps; macOS and Windows).
+- Dropping a file types its path, quoted for the pane's shell. Dropping an image while settings are open sets the background.
+
+Screen readers (Narrator, NVDA, VoiceOver, Orca) can read the focused pane's screen. The bridge
+stays idle unless one is running.
 
 ## Background image
 

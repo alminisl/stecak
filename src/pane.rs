@@ -25,6 +25,8 @@ pub type PaneId = u64;
 pub enum UserEvent {
     /// New PTY output was parsed; redraw.
     Wakeup,
+    /// A screen reader connected, asked for something, or went away.
+    Access(accesskit_winit::Event),
     /// A pane's shell exited.
     Exited(PaneId),
     /// Config file changed on disk.
@@ -35,7 +37,8 @@ pub enum UserEvent {
     Notify(PaneId, Option<String>),
     /// A newer release exists.
     UpdateAvailable(crate::update::Release),
-    /// A menu bar item was chosen (its id).
+    /// A menu bar or popup item was chosen (its id).
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Menu(String),
     /// A manual update check found nothing newer (None), or failed (Some(reason)).
     UpdateNone(Option<String>),
@@ -73,6 +76,12 @@ impl Dimensions for GridSize {
 type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
 /// Receives events emitted by the terminal state machine (title changes, replies to queries…).
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(e: accesskit_winit::Event) -> Self {
+        UserEvent::Access(e)
+    }
+}
+
 #[derive(Clone)]
 pub struct Listener {
     writer: Writer,

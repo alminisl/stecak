@@ -1,10 +1,14 @@
 //! Native macOS menu bar (Stećak / File / Edit / View / AI / Window / Help), like iTerm2's.
 //! Items carry the same shortcuts as the keyboard handler; macOS routes a shortcut to the
 //! menu first, so each item just forwards its id to the event loop as `UserEvent::Menu`.
+//! `popup` shows the same kind of items as a right-click menu on macOS and Windows.
 
 use muda::accelerator::Accelerator;
-use muda::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "macos")]
+use muda::AboutMetadata;
+use muda::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use winit::event_loop::EventLoopProxy;
+use winit::window::Window;
 
 use crate::pane::UserEvent;
 
@@ -12,11 +16,58 @@ fn item(id: &str, text: &str, keys: Option<&str>) -> MenuItem {
     MenuItem::with_id(id, text, true, keys.and_then(|k| k.parse::<Accelerator>().ok()))
 }
 
-/// Build and install the menu bar. The returned `Menu` must be kept alive.
-pub fn install(proxy: EventLoopProxy<UserEvent>) -> Menu {
+/// Route every menu click (menu bar and popups) to the event loop.
+pub fn forward_events(proxy: EventLoopProxy<UserEvent>) {
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = proxy.send_event(UserEvent::Menu(e.id.0));
     }));
+}
+
+/// One popup row: an item (id, label), a separator (`Sep`), or a submenu of items.
+pub enum Row<'a> {
+    Item(&'a str, &'a str),
+    Sep,
+    Sub(&'a str, Vec<(String, String)>),
+}
+
+/// Show a popup menu at a window position (physical pixels). Blocks until it closes; the
+/// chosen item arrives as `UserEvent::Menu`.
+pub fn popup(window: &Window, rows: &[Row], at: (f32, f32)) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let menu = Menu::new();
+    for row in rows {
+        let _ = match row {
+            Row::Item(id, text) => menu.append(&item(id, text, None)),
+            Row::Sep => menu.append(&PredefinedMenuItem::separator()),
+            Row::Sub(text, items) => {
+                let sub = Submenu::new(*text, true);
+                for (id, label) in items {
+                    let _ = sub.append(&item(id, label, None));
+                }
+                menu.append(&sub)
+            }
+        };
+    }
+    let at = Some(muda::dpi::PhysicalPosition::new(at.0 as i32, at.1 as i32).into());
+    let Ok(handle) = window.window_handle() else { return };
+    // SAFETY: the handle belongs to our live window, and this runs on the UI thread.
+    match handle.as_raw() {
+        #[cfg(windows)]
+        RawWindowHandle::Win32(h) => unsafe {
+            menu.show_context_menu_for_hwnd(h.hwnd.get(), at);
+        },
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(h) => unsafe {
+            menu.show_context_menu_for_nsview(h.ns_view.as_ptr(), at);
+        },
+        _ => {}
+    }
+}
+
+/// Build and install the menu bar. The returned `Menu` must be kept alive.
+#[cfg(target_os = "macos")]
+pub fn install(proxy: EventLoopProxy<UserEvent>) -> Menu {
+    forward_events(proxy);
     let sep = PredefinedMenuItem::separator;
     let about = AboutMetadata {
         name: Some("Stećak".into()),

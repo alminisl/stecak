@@ -33,6 +33,15 @@ pub struct Config {
     pub option_as_alt: bool,
     /// Reopen the previous tabs, splits and folders at launch.
     pub restore_session: bool,
+    /// Ask before pasting several lines (or over 5 KB) into a program that would run each
+    /// line as it arrives. Programs with bracketed paste (editors, agents, modern shells) never ask.
+    pub paste_warning: bool,
+    /// Copy text to the clipboard as soon as it's selected with the mouse.
+    pub copy_on_select: bool,
+    /// Blink the cursor. It stops after 10 s without typing, so an idle window uses no CPU.
+    pub cursor_blink: bool,
+    /// Flash the pane when a program rings the bell.
+    pub visual_bell: bool,
     /// Let zsh report where each command starts and ends (OSC 133), for "Explain last error".
     pub shell_integration: bool,
     /// Opens `file:line` links (⌘-click). Empty = VS Code, Cursor or Zed if installed, else
@@ -154,6 +163,9 @@ pub struct Profile {
     pub name: String,
     pub program: String,
     pub args: Vec<String>,
+    /// Folder that tabs opened from this profile start in ("~/" = home). Unset = the focused pane's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl Profile {
@@ -206,6 +218,10 @@ impl Default for Config {
             check_for_updates: true,
             option_as_alt: true,
             restore_session: true,
+            paste_warning: true,
+            copy_on_select: false,
+            cursor_blink: false,
+            visual_bell: false,
             shell_integration: true,
             editor: String::new(),
         }
