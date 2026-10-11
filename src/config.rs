@@ -15,6 +15,11 @@ pub struct Config {
     pub window: WindowConfig,
     pub colors: ColorConfig,
     pub shell: ShellConfig,
+    /// Extra shells for "New tab: …" in the palette, next to the detected ones (PowerShell,
+    /// cmd, WSL distros, Git Bash; `/etc/shells` on Unix). Same name = replaces a detected one.
+    pub profiles: Vec<Profile>,
+    /// Name of the profile new tabs start with. Empty = `shell`.
+    pub default_profile: String,
     pub tabs: TabsConfig,
     pub agent: AgentConfig,
     pub background_image: BackgroundImageConfig,
@@ -143,6 +148,20 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct Profile {
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Profile {
+    pub fn shell(&self) -> ShellConfig {
+        ShellConfig { program: self.program.clone(), args: self.args.clone() }
+    }
+}
+
 /// AI coding agent launched by Cmd+Shift+A in a split (e.g. "claude" or "codex").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -176,6 +195,8 @@ impl Default for Config {
             window: WindowConfig::default(),
             colors: ColorConfig::default(),
             shell: ShellConfig::default(),
+            profiles: Vec::new(),
+            default_profile: String::new(),
             tabs: TabsConfig::default(),
             agent: AgentConfig::default(),
             background_image: BackgroundImageConfig::default(),

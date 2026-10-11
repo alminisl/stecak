@@ -13,6 +13,7 @@ struct Globals {
 @group(0) @binding(3) var color_tex: texture_2d<f32>;  // RGBA color glyphs (emoji)
 @group(0) @binding(4) var image_tex: texture_2d<f32>;  // background image
 @group(0) @binding(5) var linear: sampler;
+@group(0) @binding(6) var sixel_tex: texture_2d<f32>;  // sixel image atlas
 
 struct Instance {
     @location(0) pos: vec2<f32>,
@@ -52,5 +53,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (in.kind == 1u) { out = vec4<f32>(in.color.rgb, in.color.a * coverage); }
     if (in.kind == 2u) { out = vec4<f32>(emoji.rgb, emoji.a * in.color.a); }
     if (in.kind == 3u) { out = vec4<f32>(image.rgb, image.a * in.color.a); }
+    // Explicit LOD is allowed in a branch, so glyph and rect pixels skip this fetch.
+    if (in.kind == 4u) { out = textureSampleLevel(sixel_tex, linear, in.uv, 0.0); }
     return out;
 }

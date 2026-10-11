@@ -96,6 +96,59 @@ fn powershell() -> String {
     PS.get_or_init(|| which("pwsh").map_or_else(|| "powershell.exe".into(), |p| p.display().to_string())).clone()
 }
 
+/// Whether Stećak runs elevated (as Administrator). Always false off Windows.
+pub fn is_elevated() -> bool {
+    #[cfg(windows)]
+    {
+        static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // SAFETY: no arguments; reads the process token.
+        *ELEVATED.get_or_init(|| unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0)
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Start another Stećak elevated: Windows shows the UAC prompt.
+#[cfg(windows)]
+pub fn run_elevated(args: &[String]) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let params = args.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ");
+    let (verb, file, params) = (wide("runas"), wide(&exe.display().to_string()), wide(&params));
+    // SAFETY: NUL-terminated strings that outlive the call; no owner window or directory.
+    let result = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), params.as_ptr(), std::ptr::null(), SW_SHOWNORMAL) };
+    // Values above 32 mean success; declining the UAC prompt returns ERROR_CANCELLED (1223).
+    if result as isize > 32 { Ok(()) } else { Err(format!("ShellExecuteW returned {}", result as isize)) }
+}
+
+/// Quote one argument so CommandLineToArgvW (how Rust reads `args()`) gives it back unchanged.
+#[cfg(any(windows, test))]
+fn quote_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from('"');
+    let mut slashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => slashes += 1,
+            // Backslashes before a quote are doubled, plus one to escape the quote itself.
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', slashes + 1));
+                slashes = 0;
+            }
+            _ => slashes = 0,
+        }
+        out.push(c);
+    }
+    // Backslashes before the closing quote are doubled so it stays a quote.
+    out.extend(std::iter::repeat_n('\\', slashes));
+    out.push('"');
+    out
+}
+
 /// Find a program on PATH, trying PATHEXT extensions (.exe, .cmd…) like the shell does.
 #[cfg(windows)]
 pub fn which(program: &str) -> Option<PathBuf> {
@@ -163,6 +216,16 @@ mod tests {
         assert_eq!(split_words(r#"code -g "C:\My Files\a.rs:3" ''"#), ["code", "-g", r"C:\My Files\a.rs:3", ""]);
         assert_eq!(split_words(r#"--settings '{"a":true}'"#), ["--settings", r#"{"a":true}"#]);
         assert!(split_words("   ").is_empty());
+    }
+
+    #[test]
+    fn quotes_windows_args() {
+        assert_eq!(quote_arg("-NoLogo"), "-NoLogo");
+        assert_eq!(quote_arg(r"C:\Program Files\PowerShell\7\pwsh.exe"), r#""C:\Program Files\PowerShell\7\pwsh.exe""#);
+        assert_eq!(quote_arg(""), r#""""#);
+        assert_eq!(quote_arg(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote_arg(r"C:\dir with space\"), r#""C:\dir with space\\""#);
+        assert_eq!(quote_arg(r#"a\"b"#), r#""a\\\"b""#);
     }
 
     #[test]

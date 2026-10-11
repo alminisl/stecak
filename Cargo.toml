@@ -32,6 +32,8 @@ arboard = "3"
 dirs = "6"
 log = "0.4"
 env_logger = "0.11"
+# Sixel: finding escape sequences in PTY output (already in the tree via regex).
+memchr = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -47,7 +49,7 @@ wgpu = { version = "30", default-features = false, features = ["gles"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.6"
 # Process snapshots: which program runs in a pane (agents, session restore).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Controls"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # Embeds the .exe icon (build.rs).
 [target.'cfg(windows)'.build-dependencies]

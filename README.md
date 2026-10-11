@@ -9,6 +9,7 @@ The name comes from the *stećci*, the medieval tombstones of Bosnia and Herzego
 - **Fast:** the fastest of four terminals on [vtebench](https://github.com/alacritty/vtebench) on an Apple M5: 141 ms, vs Ghostty 191 ms, Terminal.app 2,611 ms and iTerm2 12,383 ms.
 - **Light:** ~33 MB per window at rest, and extra tabs and splits cost about 1 MB each.
 - GPU rendering (Metal, DX12, Vulkan), programming ligatures, color emoji, tabs and splits.
+- Sixel images (chafa, yazi, img2sixel…), shell profiles (PowerShell, cmd, WSL, Git Bash), and on Windows a "New window as Administrator".
 - Transparency and blur, an iTerm2-style background image, an in-app settings page, and a YAML/JSON config that reloads live.
 
 > **Status: alpha.** It's a daily driver on macOS, and is now being used on Windows. Linux builds in CI but hasn't been used day to day yet.
@@ -121,6 +122,7 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | T / W | new tab / close pane (closes the tab with its last pane) |
 | D / Shift+D (Ctrl+Shift+E off macOS) | split right / split down |
 | ] / [ | next / previous pane |
+| Shift+Enter (Ctrl+Shift+Enter elsewhere) | zoom the focused pane |
 | Shift+] / Shift+[, Ctrl+Tab, 1–9 | switch tab |
 | C / V | copy selection / paste (bracketed-paste aware) |
 | F, G / Shift+G | find in scrollback, next / previous match |
@@ -132,6 +134,12 @@ file and opens it. See [`config.example.yaml`](config.example.yaml).
 | Shift+B | Bosančica mode on/off |
 | , | settings page (⚙ in the tab bar too) |
 | / | keyboard shortcut legend |
+
+Alt+Shift+arrows (Cmd+Ctrl+arrows on macOS) resize splits, like Windows Terminal.
+
+Tabs: double-click one to rename it, drag to reorder, and pick a color with **Tab color: …** in
+the command palette. Names and colors come back with the session. **New tab: …** in the palette
+opens any detected shell; **Default profile: …** makes it the default.
 
 Mouse:
 - Drag to select; double-click selects a word, triple-click a line, Shift+click extends.

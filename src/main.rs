@@ -24,11 +24,13 @@ mod menu;
 mod mouse;
 mod palette;
 mod pane;
+mod profiles;
 mod renderer;
 mod restore;
 mod search;
 mod settings;
 mod shell;
+mod sixel;
 mod text;
 mod theme;
 mod update;
@@ -77,7 +79,22 @@ struct Tab {
     /// Room is kept for the context bar (a Claude Code session was seen in this tab). Per
     /// tab, so switching tabs never resizes panes, which would make idle agents redraw.
     context_bar: bool,
+    /// Set by renaming the tab; None = the focused pane's title.
+    name: Option<String>,
+    /// Index into the theme's ANSI palette (1 red … 6 cyan).
+    color: Option<usize>,
+    /// Only the focused pane is laid out and drawn.
+    zoomed: bool,
 }
+
+impl Tab {
+    fn new(root: Node, focus: PaneId) -> Self {
+        Tab { root, focus, context_bar: false, name: None, color: None, zoomed: false }
+    }
+}
+
+/// Colors offered for tabs: (name, index into the theme's ANSI palette).
+const TAB_COLORS: [(&str, usize); 6] = [("Red", 1), ("Green", 2), ("Yellow", 3), ("Blue", 4), ("Magenta", 5), ("Cyan", 6)];
 
 /// The Claude Code session the context bar is showing.
 struct ContextState {
@@ -107,6 +124,8 @@ enum Drag {
     Select(PaneId),
     Report(PaneId),
     Divider(Divider),
+    /// Reordering tabs; the dragged tab's current index.
+    Tab(usize),
 }
 
 /// Frame-time statistics, logged every few seconds with STECAK_STATS=1.
@@ -173,6 +192,12 @@ struct App {
     help_open: bool,
     /// Tab under the mouse (shows its close ×).
     hover_tab: Option<usize>,
+    /// Tab being renamed and the text typed so far.
+    renaming: Option<(usize, String)>,
+    /// Last tab-bar click (time, tab), for double-click to rename.
+    last_tab_click: Option<(Instant, usize)>,
+    /// Last title given to the window, so it is only set when it changes.
+    window_title: String,
     /// Context bar: the session shown, when it was last checked (and for which tab/pane/setting),
     /// the mouse is over it, and `/context` breakdowns per folder (None while loading).
     context: Option<ContextState>,
@@ -252,6 +277,9 @@ impl App {
             #[cfg(target_os = "macos")]
             _menu: None,
             hover_tab: None,
+            renaming: None,
+            last_tab_click: None,
+            window_title: String::new(),
             context: None,
             context_checked: None,
             context_hover: false,
@@ -298,7 +326,9 @@ impl App {
         let gap = (layout::DIVIDER * r.scale).round().max(1.0);
         let (mut rects, mut dividers) = (vec![], vec![]);
         let bottom = self.context_bar_h(tab);
-        t.root.layout(Rect { x: 0.0, y: top, w, h: h - top - bottom }, gap, &mut rects, &mut dividers);
+        let zoomed = Node::Leaf(t.focus);
+        let root = if t.zoomed { &zoomed } else { &t.root };
+        root.layout(Rect { x: 0.0, y: top, w, h: h - top - bottom }, gap, &mut rects, &mut dividers);
         let geoms = rects
             .into_iter()
             .map(|(id, rect)| {
@@ -316,24 +346,24 @@ impl App {
     }
 
     fn shell_config(&self) -> Config {
-        let mut cfg = self.config.clone();
-        if let Some(shell) = &self.cli_shell {
-            cfg.shell = shell.clone();
-        }
-        cfg
+        shell_config(self.config.clone(), self.cli_shell.as_ref())
     }
 
-    /// Spawn a pane running the shell, or `command` through the login shell. Starts in `cwd`,
-    /// else the focused pane's directory.
-    fn spawn_pane(&mut self, command: Option<&str>, cwd: Option<PathBuf>) -> Option<PaneId> {
+    /// Spawn a pane running the shell (`shell`, else the default profile), or `command` through
+    /// the login shell. Starts in `cwd`, else the focused pane's directory.
+    fn spawn_pane(&mut self, command: Option<&str>, cwd: Option<PathBuf>, shell: Option<ShellConfig>) -> Option<PaneId> {
         let id = self.next_id;
         self.next_id += 1;
         let cwd = cwd.or_else(|| self.focused_pane().and_then(|p| p.cwd()));
         let size = GridSize { cols: 80, rows: 24 }; // corrected by resize_all() right after
-        let prespawned = self.prespawned.take().filter(|_| command.is_none() && cwd.is_none());
+        let prespawned = self.prespawned.take().filter(|_| command.is_none() && cwd.is_none() && shell.is_none());
+        let mut cfg = self.shell_config();
+        if let Some(shell) = shell {
+            cfg.shell = shell;
+        }
         let result = match prespawned {
             Some(handle) => handle.join().unwrap_or_else(|_| Err("shell spawn thread panicked".into())),
-            None => Pane::spawn(id, &self.shell_config(), size, self.cell_px(), cwd.as_deref(), command, self.proxy.clone(), self.wakeup_pending.clone()),
+            None => Pane::spawn(id, &cfg, size, self.cell_px(), cwd.as_deref(), command, self.proxy.clone(), self.wakeup_pending.clone()),
         };
         match result {
             Ok(p) => {
@@ -352,8 +382,12 @@ impl App {
     }
 
     fn open_tab(&mut self, command: Option<&str>, cwd: Option<PathBuf>) {
-        if let Some(id) = self.spawn_pane(command, cwd) {
-            self.tabs.push(Tab { root: Node::Leaf(id), focus: id, context_bar: false });
+        self.open_tab_with(command, cwd, None);
+    }
+
+    fn open_tab_with(&mut self, command: Option<&str>, cwd: Option<PathBuf>, shell: Option<ShellConfig>) {
+        if let Some(id) = self.spawn_pane(command, cwd, shell) {
+            self.tabs.push(Tab::new(Node::Leaf(id), id));
             self.active = self.tabs.len() - 1;
             self.resize_all();
         }
@@ -361,10 +395,13 @@ impl App {
 
     fn split(&mut self, dir: Dir, command: Option<&str>) {
         let Some(focus) = self.tabs.get(self.active).map(|t| t.focus) else { return };
-        if let Some(id) = self.spawn_pane(command, None) {
+        // Splits duplicate the focused pane's profile, like Windows Terminal's Alt+Shift+D.
+        let shell = self.panes.get(&focus).map(|p| p.shell.clone());
+        if let Some(id) = self.spawn_pane(command, None, shell) {
             let tab = &mut self.tabs[self.active];
             tab.root.split(focus, id, dir);
             tab.focus = id;
+            tab.zoomed = false;
             self.resize_all();
         }
     }
@@ -382,7 +419,9 @@ impl App {
         if self.search.pane == id {
             self.search.close();
         }
+        self.renaming = None;
         let tab = &mut self.tabs[ti];
+        tab.zoomed = false;
         if tab.root.remove(id) {
             if tab.focus == id {
                 tab.focus = tab.root.first_leaf();
@@ -434,6 +473,9 @@ impl App {
         tab.root.leaves(&mut ids);
         if let Some(i) = ids.iter().position(|&id| id == tab.focus) {
             tab.focus = ids[(i as i32 + delta).rem_euclid(ids.len() as i32) as usize];
+        }
+        if std::mem::take(&mut tab.zoomed) {
+            self.resize_all();
         }
         self.mark_dirty();
     }
@@ -718,7 +760,7 @@ impl App {
 
     fn open_palette(&mut self) {
         let fonts = self.r().monospace_families().to_vec();
-        self.palette.open(&fonts);
+        self.palette.open(&fonts, &profiles::all(&self.config));
         self.mark_dirty();
     }
 
@@ -780,7 +822,7 @@ impl App {
             .map(|t| {
                 let mut ids = vec![];
                 t.root.leaves(&mut ids);
-                restore::SavedTab { root: self.saved_node(&t.root), focus: ids.iter().position(|&id| id == t.focus).unwrap_or(0) }
+                restore::SavedTab { root: self.saved_node(&t.root), focus: ids.iter().position(|&id| id == t.focus).unwrap_or(0), name: t.name.clone(), color: t.color }
             })
             .collect();
         restore::save(&restore::Saved { active: self.active, tabs }, self.config_dir());
@@ -789,12 +831,12 @@ impl App {
     fn saved_node(&self, node: &Node) -> restore::SavedNode {
         match node {
             Node::Leaf(id) => {
-                let Some(p) = self.panes.get(id) else { return restore::SavedNode::Pane { cwd: None, command: None } };
+                let Some(p) = self.panes.get(id) else { return restore::SavedNode::Pane { cwd: None, command: None, shell: None } };
                 let command = p.foreground_process().and_then(|name| {
                     let session = p.foreground_pid().and_then(agents::claude_session_id);
                     restore::resume_command(&name, session.as_deref())
                 });
-                restore::SavedNode::Pane { cwd: p.cwd(), command }
+                restore::SavedNode::Pane { cwd: p.cwd(), command, shell: Some(p.shell.clone()).filter(|s| !s.program.is_empty()) }
             }
             Node::Split { dir, ratio, a, b } => {
                 restore::SavedNode::Split { horizontal: *dir == Dir::Horizontal, ratio: *ratio, a: Box::new(self.saved_node(a)), b: Box::new(self.saved_node(b)) }
@@ -810,7 +852,7 @@ impl App {
                 let mut ids = vec![];
                 root.leaves(&mut ids);
                 let focus = ids.get(t.focus).copied().unwrap_or(ids[0]);
-                self.tabs.push(Tab { root, focus, context_bar: false });
+                self.tabs.push(Tab { name: t.name, color: t.color, ..Tab::new(root, focus) });
             }
         }
         if self.tabs.is_empty() {
@@ -823,7 +865,7 @@ impl App {
 
     fn restored_node(&mut self, node: restore::SavedNode) -> Option<Node> {
         match node {
-            restore::SavedNode::Pane { cwd, command } => self.spawn_pane(command.as_deref(), cwd.or_else(dirs::home_dir)).map(Node::Leaf),
+            restore::SavedNode::Pane { cwd, command, shell } => self.spawn_pane(command.as_deref(), cwd.or_else(dirs::home_dir), shell).map(Node::Leaf),
             restore::SavedNode::Split { horizontal, ratio, a, b } => match (self.restored_node(*a), self.restored_node(*b)) {
                 (Some(a), Some(b)) => Some(Node::Split { dir: restore::SavedNode::dir(horizontal), ratio: ratio.clamp(0.1, 0.9), a: Box::new(a), b: Box::new(b) }),
                 (Some(n), None) | (None, Some(n)) => Some(n),
@@ -865,6 +907,23 @@ impl App {
             Action::AskAi => self.open_ask(),
             Action::ExplainError => self.explain_last_error(),
             Action::SendToAgent => self.send_selection(),
+            Action::ResizePane(dir, delta) => {
+                if let Some(tab) = self.tabs.get_mut(self.active).filter(|t| !t.zoomed) {
+                    if tab.root.nudge(tab.focus, dir, delta) {
+                        self.resize_all();
+                        self.mark_dirty();
+                    }
+                }
+            }
+            Action::ZoomPane => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    let mut ids = vec![];
+                    tab.root.leaves(&mut ids);
+                    tab.zoomed = !tab.zoomed && ids.len() > 1;
+                    self.resize_all();
+                    self.mark_dirty();
+                }
+            }
             Action::NextPane => self.cycle_pane(1),
             Action::PrevPane => self.cycle_pane(-1),
             Action::Shortcuts => {
@@ -963,13 +1022,29 @@ impl App {
             "ask-ai" => Action::AskAi,
             "explain-error" => Action::ExplainError,
             "send-to-agent" => Action::SendToAgent,
+            "zoom-pane" => Action::ZoomPane,
+            "rename-tab" => return self.start_rename(self.active),
+            #[cfg(windows)]
+            "admin-window" => return self.open_admin_window(),
             _ => {
+                if let Some(color) = id.strip_prefix("tab-color:") {
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.color = color.parse().ok();
+                    }
+                    return self.mark_dirty();
+                }
                 let mut cfg = self.config.clone();
                 if let Some(preset) = id.strip_prefix("theme:").and_then(|i| i.parse::<usize>().ok()).and_then(|i| theme::PRESETS.get(i)) {
                     preset.apply(&mut cfg.colors);
                 } else if let Some(family) = id.strip_prefix("font:") {
                     cfg.font.family.retain(|f| f != family);
                     cfg.font.family.insert(0, family.to_string());
+                } else if let Some(name) = id.strip_prefix("profile:") {
+                    let shell = profiles::find(&cfg, name);
+                    self.open_tab_with(None, None, shell);
+                    return self.mark_dirty();
+                } else if let Some(name) = id.strip_prefix("default-profile:") {
+                    cfg.default_profile = name.to_string();
                 } else {
                     return;
                 }
@@ -1071,6 +1146,51 @@ impl App {
     }
 
     /// Keys while the search bar is open. Returns true if consumed.
+    fn start_rename(&mut self, tab: usize) {
+        let Some(t) = self.tabs.get(tab) else { return };
+        let current = t.name.clone().or_else(|| self.panes.get(&t.focus).map(|p| p.display_title())).unwrap_or_default();
+        self.renaming = Some((tab, current));
+        self.mark_dirty();
+    }
+
+    /// Typing a tab's new name: ⏎ keeps it (empty = back to the pane's title), esc cancels.
+    fn rename_key(&mut self, event: &KeyEvent) -> bool {
+        let Some((tab, name)) = self.renaming.as_mut() else { return false };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.renaming = None,
+            Key::Named(NamedKey::Enter) => {
+                let (tab, name) = (*tab, name.trim().to_string());
+                if let Some(t) = self.tabs.get_mut(tab) {
+                    t.name = (!name.is_empty()).then_some(name);
+                }
+                self.renaming = None;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                name.pop();
+            }
+            _ => match &event.text {
+                Some(t) if !t.chars().any(char::is_control) => name.push_str(t),
+                _ => return false,
+            },
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// A new elevated window with the focused pane's shell. Windows keeps elevated and normal
+    /// processes apart (UIPI), so like Windows Terminal this is a separate window, not a tab.
+    #[cfg(windows)]
+    fn open_admin_window(&self) {
+        let shell = self.focused_pane().map(|p| p.shell.clone()).filter(|s| !s.program.is_empty()).unwrap_or_else(|| self.shell_config().shell);
+        let (program, args) = shell::interactive(&Config { shell, ..Config::default() });
+        // `-e` also keeps the elevated window from restoring or overwriting the saved session.
+        let mut argv = vec!["-e".to_string(), program];
+        argv.extend(args);
+        if let Err(e) = shell::run_elevated(&argv) {
+            log::warn!("couldn't start an elevated window: {e}");
+        }
+    }
+
     fn search_key(&mut self, event: &KeyEvent) -> bool {
         let Some(pane) = self.panes.get(&self.search.pane) else { return false };
         let mut query = self.search.query.clone();
@@ -1150,6 +1270,8 @@ impl App {
                 self.sessions.query = arg.to_string();
             }
             "help" => self.help_open = true,
+            // Any menu / palette id, e.g. "action:zoom-pane" or "action:tab-color:2".
+            "action" => self.menu_action(arg, event_loop),
             "palette" => {
                 self.open_palette();
                 self.palette.query = arg.to_string();
@@ -1314,6 +1436,10 @@ impl App {
 
     fn on_press(&mut self, button: MouseButton, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        // Clicking anywhere ends a tab rename without keeping it.
+        if self.renaming.take().is_some() {
+            self.mark_dirty();
+        }
         if self.help_open {
             self.help_open = false;
             self.mark_dirty();
@@ -1444,7 +1570,7 @@ impl App {
                 }
                 self.mark_dirty();
             }
-            Some(Drag::Divider(_)) | None => {}
+            Some(Drag::Divider(_) | Drag::Tab(_)) | None => {}
         }
     }
 
@@ -1478,6 +1604,16 @@ impl App {
             self.mark_dirty();
         }
         match self.drag.clone() {
+            Some(Drag::Tab(from)) => {
+                if let Some(to) = hover_tab.filter(|&to| to != from && to < self.tabs.len()) {
+                    let tab = self.tabs.remove(from);
+                    self.tabs.insert(to, tab);
+                    self.active = to;
+                    self.renaming = None;
+                    self.drag = Some(Drag::Tab(to));
+                    self.mark_dirty();
+                }
+            }
             Some(Drag::Divider(d)) => {
                 let (x, y) = self.mouse;
                 let ratio = match d.dir {
@@ -1534,7 +1670,14 @@ impl App {
                     self.close_pane(id, event_loop);
                 }
             } else {
+                let now = Instant::now();
+                let double = self.last_tab_click.is_some_and(|(t, i)| i == idx && now - t < Duration::from_millis(400));
+                self.last_tab_click = Some((now, idx));
                 self.active = idx;
+                if double {
+                    return self.start_rename(idx);
+                }
+                self.drag = Some(Drag::Tab(idx));
             }
             self.mark_dirty();
         } else if x < tab_w * self.tabs.len() as f32 + plus_w {
@@ -1663,6 +1806,12 @@ impl App {
             stats.rows_built += s.rows_built;
             stats.rows_cached += s.rows_cached;
             let is_focus = Some(g.id) == focus;
+            {
+                let images = p.images.lock();
+                if !images.is_empty() {
+                    sixel::draw(r, &term, &images, g.gx, g.gy, g.cols, g.rows);
+                }
+            }
             draw::draw_cursor(r, &term, theme, g.gx, g.gy, self.focused && is_focus);
             drop(term);
             if multi && !is_focus {
@@ -1715,14 +1864,25 @@ impl App {
             for (i, tab) in tabs.iter().enumerate() {
                 let x = i as f32 * tab_w;
                 let active = i == self.active;
+                let color = tab.color.and_then(|c| theme.palette.get(c).copied());
                 if active {
                     r.rect(x, title_h, tab_w, strip_h, rgba(theme.tab_active, 1.0));
-                    r.rect(x, tab_bar_h - 2.0 * r.scale, tab_w, 2.0 * r.scale, rgba(theme.palette[4], 1.0));
+                }
+                if let Some(c) = color {
+                    r.rect(x, title_h, tab_w, strip_h, rgba(c, if active { 0.3 } else { 0.18 }));
+                }
+                if active || color.is_some() {
+                    r.rect(x, tab_bar_h - 2.0 * r.scale, tab_w, 2.0 * r.scale, rgba(color.unwrap_or(theme.palette[4]), 1.0));
                 }
                 r.rect(x + tab_w - r.scale, title_h + strip_h * 0.25, r.scale, strip_h * 0.5, rgba(theme.fg, 0.15));
                 let mut n = vec![];
                 tab.root.leaves(&mut n);
-                let title = panes.get(&tab.focus).map(|p| p.display_title()).unwrap_or_default();
+                let title = match (&self.renaming, &tab.name) {
+                    (Some((ri, text)), _) if *ri == i => format!("{text}▏"),
+                    (_, Some(name)) => name.clone(),
+                    _ => panes.get(&tab.focus).map(|p| p.display_title()).unwrap_or_default(),
+                };
+                let title = if tab.zoomed { format!("{title} ⤢") } else { title };
                 let label = if n.len() > 1 { format!("{}  {}  [{}]", i + 1, title, n.len()) } else { format!("{}  {}", i + 1, title) };
                 let (working, waiting) = statuses.get(i).copied().unwrap_or_default();
                 let amber = rgba(theme.palette[3], 1.0);
@@ -1815,7 +1975,13 @@ impl App {
         self.atlas_retry = atlas_reset;
 
         if let (Some(w), Some(p)) = (&self.window, focus.and_then(|f| self.panes.get(&f))) {
-            w.set_title(&format!("{} — Stećak", p.display_title()));
+            let admin = if shell::is_elevated() { "Administrator: " } else { "" };
+            let title = format!("{admin}{} — Stećak", p.display_title());
+            // Setting a window title is a syscall plus a repaint of the native titlebar.
+            if title != self.window_title {
+                w.set_title(&title);
+                self.window_title = title;
+            }
         }
         self.record_stats(t1 - t0, t1.elapsed(), stats);
     }
@@ -1897,6 +2063,19 @@ impl App {
         );
         *s = Stats { enabled: true, since: Some(Instant::now()), ..Default::default() };
     }
+}
+
+/// The config panes start with: `-e` from the command line, else the default profile.
+fn shell_config(mut cfg: Config, cli_shell: Option<&ShellConfig>) -> Config {
+    if let Some(shell) = cli_shell {
+        cfg.shell = shell.clone();
+    } else if !cfg.default_profile.is_empty() {
+        match profiles::find(&cfg, &cfg.default_profile) {
+            Some(shell) => cfg.shell = shell,
+            None => log::warn!("default_profile {:?} not found; using shell", cfg.default_profile),
+        }
+    }
+    cfg
 }
 
 fn draw_search_bar(r: &mut Renderer, theme: &Theme, search: &Search, g: &PaneGeom) {
@@ -2344,9 +2523,10 @@ impl ApplicationHandler<UserEvent> for App {
         // Start the first tab's shell now, in parallel with GPU setup. Not when a saved
         // session will be restored instead. It becomes pane `next_id` (the first spawn).
         if !(self.restoring_enabled() && restore::load(self.config_dir()).is_some()) {
-            let (id, cfg, proxy, wakeup) = (self.next_id, self.shell_config(), self.proxy.clone(), self.wakeup_pending.clone());
-            // Placeholder size; resize_all() fixes it once the tab exists.
-            let spawn = move || Pane::spawn(id, &cfg, GridSize { cols: 80, rows: 24 }, (8, 16), None, None, proxy, wakeup);
+            let (id, cfg, cli, proxy, wakeup) = (self.next_id, self.config.clone(), self.cli_shell.clone(), self.proxy.clone(), self.wakeup_pending.clone());
+            // Placeholder size; resize_all() fixes it once the tab exists. Profile detection
+            // (registry, PATH) happens on this thread too, not the UI thread.
+            let spawn = move || Pane::spawn(id, &shell_config(cfg, cli.as_ref()), GridSize { cols: 80, rows: 24 }, (8, 16), None, None, proxy, wakeup);
             self.prespawned = std::thread::Builder::new().name("prespawn".into()).spawn(spawn).ok();
         }
         let renderer = Renderer::new(window.clone(), event_loop.owned_display_handle(), &self.config);
@@ -2545,6 +2725,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.search.open && !app_mod && self.search_key(&event) {
                     return;
                 }
+                if self.renaming.is_some() && !app_mod && self.rename_key(&event) {
+                    return;
+                }
                 let app_cursor = self.focused_pane().is_some_and(|p| p.term.lock().mode().contains(TermMode::APP_CURSOR));
                 if let Some(action) = input::translate(&event, self.modifiers, app_cursor, self.config.option_as_alt) {
                     self.handle_action(action, event_loop);
@@ -2556,7 +2739,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit.clear();
-                if self.ask.open && !self.ask.busy {
+                if let Some((_, name)) = self.renaming.as_mut() {
+                    name.push_str(&text);
+                    self.mark_dirty();
+                } else if self.ask.open && !self.ask.busy {
                     self.ask.query.push_str(&text);
                     self.mark_dirty();
                 } else if self.search.open {

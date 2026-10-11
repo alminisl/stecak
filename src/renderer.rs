@@ -20,6 +20,9 @@ const KIND_RECT: u32 = 0;
 const KIND_MASK: u32 = 1;
 const KIND_COLOR: u32 = 2;
 const KIND_IMAGE: u32 = 3;
+const KIND_SIXEL: u32 = 4;
+// RGBA atlas for sixel images (16 MB), created when the first image is shown.
+const SIXEL_ATLAS: u32 = crate::sixel::MAX_SIDE;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -109,6 +112,10 @@ pub struct Renderer {
     mask_tex: wgpu::Texture,
     color_tex: wgpu::Texture,
     image_tex: wgpu::Texture,
+    sixel_tex: wgpu::Texture,
+    /// Images in the sixel atlas: id → slot (x, y).
+    sixel_slots: HashMap<u64, (u32, u32)>,
+    sixel_packer: Option<Packer>,
     nearest: wgpu::Sampler,
     linear: wgpu::Sampler,
     instance_buf: wgpu::Buffer,
@@ -214,6 +221,7 @@ impl Renderer {
         let color_tex = texture(&device, "color atlas", COLOR_ATLAS, COLOR_ATLAS, wgpu::TextureFormat::Rgba8Unorm);
         // 1×1 transparent placeholder until a background image is configured.
         let image_tex = texture(&device, "background image", 1, 1, wgpu::TextureFormat::Rgba8Unorm);
+        let sixel_tex = texture(&device, "sixel atlas", 1, 1, wgpu::TextureFormat::Rgba8Unorm);
         let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
@@ -255,6 +263,7 @@ impl Renderer {
                 tex_entry(3),
                 tex_entry(4),
                 sampler_entry(5),
+                tex_entry(6),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -303,7 +312,7 @@ impl Renderer {
 
         let instance_cap = 4096;
         let instance_buf = Self::make_instance_buf(&device, instance_cap);
-        let bind_group = Self::make_bind_group(&device, &bind_layout, &globals_buf, &mask_tex, &color_tex, &image_tex, &nearest, &linear);
+        let bind_group = Self::make_bind_group(&device, &bind_layout, &globals_buf, &mask_tex, &color_tex, &image_tex, &sixel_tex, &nearest, &linear);
 
         let scale = window.scale_factor() as f32;
         let text = Text::load(cfg, scale);
@@ -320,6 +329,9 @@ impl Renderer {
             mask_tex,
             color_tex,
             image_tex,
+            sixel_tex,
+            sixel_slots: HashMap::new(),
+            sixel_packer: None,
             nearest,
             linear,
             instance_buf,
@@ -345,10 +357,12 @@ impl Renderer {
         mask: &wgpu::Texture,
         color: &wgpu::Texture,
         image: &wgpu::Texture,
+        sixel: &wgpu::Texture,
         nearest: &wgpu::Sampler,
         linear: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         let (mask_v, color_v, image_v) = (mask.create_view(&Default::default()), color.create_view(&Default::default()), image.create_view(&Default::default()));
+        let sixel_v = sixel.create_view(&Default::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout,
@@ -359,6 +373,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&color_v) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&image_v) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(linear) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sixel_v) },
             ],
         })
     }
@@ -418,6 +433,10 @@ impl Renderer {
         };
         self.image_tex = tex;
         self.image_size = size;
+        self.rebind();
+    }
+
+    fn rebind(&mut self) {
         self.bind_group = Self::make_bind_group(
             &self.device,
             &self.bind_layout,
@@ -425,9 +444,56 @@ impl Renderer {
             &self.mask_tex,
             &self.color_tex,
             &self.image_tex,
+            &self.sixel_tex,
             &self.nearest,
             &self.linear,
         );
+    }
+
+    /// Draw part of sixel image `id` at `dst` (x, y, w, h); `frac` is the visible part of the
+    /// image (x, y, w, h as fractions). Uploads the image to the atlas the first time it's seen.
+    pub fn sixel(&mut self, id: u64, rgba: &[u8], w: u32, h: u32, dst: [f32; 4], frac: [f32; 4]) {
+        let slot = match self.sixel_slots.get(&id) {
+            Some(&slot) => slot,
+            None => {
+                if self.sixel_packer.is_none() {
+                    self.sixel_tex = texture(&self.device, "sixel atlas", SIXEL_ATLAS, SIXEL_ATLAS, wgpu::TextureFormat::Rgba8Unorm);
+                    self.sixel_packer = Some(Packer::new(SIXEL_ATLAS));
+                    self.rebind();
+                }
+                let packer = self.sixel_packer.as_mut().unwrap();
+                // shortcut: a full atlas starts over, so images already queued this frame may show
+                // a newer image's pixels for one frame; use a texture array if that shows up.
+                let slot = match packer.alloc(w, h) {
+                    Some(s) => s,
+                    None => {
+                        *packer = Packer::new(SIXEL_ATLAS);
+                        self.sixel_slots.clear();
+                        let Some(s) = packer.alloc(w, h) else { return };
+                        s
+                    }
+                };
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &self.sixel_tex, mip_level: 0, origin: wgpu::Origin3d { x: slot.0, y: slot.1, z: 0 }, aspect: wgpu::TextureAspect::All },
+                    rgba,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+                self.sixel_slots.insert(id, slot);
+                slot
+            }
+        };
+        let a = SIXEL_ATLAS as f32;
+        let (u, v) = ((slot.0 as f32 + frac[0] * w as f32) / a, (slot.1 as f32 + frac[1] * h as f32) / a);
+        self.instances.push(Instance {
+            pos: [dst[0], dst[1]],
+            size: [dst[2], dst[3]],
+            uv_pos: [u, v],
+            uv_size: [frac[2] * w as f32 / a, frac[3] * h as f32 / a],
+            color: [1.0; 4],
+            kind: KIND_SIXEL,
+            _pad: [0; 3],
+        });
     }
 
     pub fn monospace_families(&self) -> &[String] {

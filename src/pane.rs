@@ -85,6 +85,11 @@ impl EventListener for Listener {
     fn send_event(&self, event: TermEvent) {
         match event {
             // Replies to device status / cursor position queries etc. Shells and TUIs need these.
+            // Primary device attributes: add 4 (sixel graphics), which apps like chafa,
+            // yazi and img2sixel check before sending images.
+            TermEvent::PtyWrite(s) if s == "\x1b[?6c" => {
+                let _ = self.writer.lock().write_all(b"\x1b[?62;4;22c");
+            }
             TermEvent::PtyWrite(s) => {
                 let _ = self.writer.lock().write_all(s.as_bytes());
             }
@@ -128,6 +133,10 @@ pub struct Pane {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// Last size sent to the PTY, to avoid redundant resizes (which make shells redraw).
     last_size: (usize, usize),
+    /// The shell (profile) this pane was started with; splits and session restore reuse it.
+    pub shell: crate::config::ShellConfig,
+    /// Sixel images shown in this pane (decoded by the reader thread).
+    pub images: Arc<Mutex<crate::sixel::Store>>,
 }
 
 impl Pane {
@@ -214,18 +223,30 @@ impl Pane {
         let reported_cwd = Arc::new(Mutex::new(None));
         let reported_cwd_reader = reported_cwd.clone();
         let last_command_reader = last_command.clone();
+        let images = Arc::new(Mutex::new(crate::sixel::Store::default()));
+        let images_reader = images.clone();
+        let size_reader = window_size.clone();
         std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
             .stack_size(256 * 1024)
             .spawn(move || {
                 let mut parser: Processor = Processor::new();
+                let mut sixel = crate::sixel::Splitter::default();
                 let mut tracker = crate::ai::CommandTracker::default();
                 let mut buf = vec![0u8; 1 << 16];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            parser.advance(&mut *term_reader.lock(), &buf[..n]);
+                            sixel.feed(&buf[..n], |piece| match piece {
+                                crate::sixel::Piece::Text(text) => parser.advance(&mut *term_reader.lock(), text),
+                                crate::sixel::Piece::Image(img) => {
+                                    let mut term = term_reader.lock();
+                                    let size = *size_reader.lock();
+                                    let cells = crate::sixel::place(&mut images_reader.lock(), img, &term, (size.cell_width, size.cell_height));
+                                    parser.advance(&mut *term, cells.as_bytes());
+                                }
+                            });
                             fresh_reader.store(true, Ordering::Release);
                             last_output_reader.store(now_ms(), Ordering::Release);
                             if let Some(record) = tracker.feed(&buf[..n]) {
@@ -252,7 +273,7 @@ impl Pane {
             })
             .map_err(|e| e.to_string())?;
 
-        Ok(Self { term, fresh, last_output, title, last_command, reported_cwd, writer, master: pair.master, window_size, child, last_size })
+        Ok(Self { term, fresh, last_output, title, last_command, reported_cwd, writer, master: pair.master, window_size, child, last_size, shell: config.shell.clone(), images })
     }
 
     pub fn write(&self, bytes: &[u8]) {

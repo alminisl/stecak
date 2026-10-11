@@ -74,6 +74,34 @@ impl Node {
         }
     }
 
+    /// Move the divider nearest `target` that runs across `dir` by `delta` (a fraction of
+    /// its split): positive = right/down. False when no such split encloses `target`.
+    pub fn nudge(&mut self, target: PaneId, dir: Dir, delta: f32) -> bool {
+        let Node::Split { dir: d, ratio, a, b } = self else { return false };
+        let child = if a.contains(target) {
+            a
+        } else if b.contains(target) {
+            b
+        } else {
+            return false;
+        };
+        if child.nudge(target, dir, delta) {
+            return true;
+        }
+        if *d != dir {
+            return false;
+        }
+        *ratio = (*ratio + delta).clamp(0.1, 0.9);
+        true
+    }
+
+    pub fn contains(&self, target: PaneId) -> bool {
+        match self {
+            Node::Leaf(id) => *id == target,
+            Node::Split { a, b, .. } => a.contains(target) || b.contains(target),
+        }
+    }
+
     /// Replace leaf `target` with a split of (target, new).
     pub fn split(&mut self, target: PaneId, new: PaneId, dir: Dir) -> bool {
         match self {
@@ -167,6 +195,15 @@ mod tests {
         let (mut panes, mut divs) = (vec![], vec![]);
         root.layout(Rect { x: 0.0, y: 0.0, w: 201.0, h: 101.0 }, 1.0, &mut panes, &mut divs);
         assert_eq!(panes[0].1.w, 50.0);
+
+        // Keyboard resize moves the nearest divider of that direction: pane 3 sits in the
+        // vertical split, so a horizontal nudge falls through to the root.
+        assert!(root.nudge(3, Dir::Horizontal, 0.05));
+        assert!(root.nudge(3, Dir::Vertical, -0.05));
+        let Node::Split { ratio, b, .. } = &root else { unreachable!() };
+        assert!((ratio - 0.30).abs() < 1e-6);
+        assert!(matches!(**b, Node::Split { ratio, .. } if (ratio - 0.45).abs() < 1e-6));
+        assert!(!Node::Leaf(1).nudge(1, Dir::Vertical, 0.1));
 
         assert!(root.remove(2));
         ids.clear();

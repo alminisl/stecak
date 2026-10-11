@@ -1,6 +1,7 @@
 //! Command palette (⌘⇧P): every action, theme and installed font in one searchable list.
 //! Entries carry the same ids as the menu bar, so picking one runs the same code path.
 
+use crate::config::Profile;
 use crate::theme::PRESETS;
 
 #[derive(Clone)]
@@ -38,6 +39,9 @@ const ACTIONS: &[(&str, &str, &str, &str)] = &[
     ("Split right", "⌘D", "Ctrl+Shift+D", "split-right"),
     ("Split down", "⌘⇧D", "Ctrl+Shift+E", "split-down"),
     ("Close pane", "⌘W", "Ctrl+Shift+W", "close"),
+    ("Zoom pane", "⌘⇧⏎", "Ctrl+Shift+Enter", "zoom-pane"),
+    ("Rename tab", "double-click", "double-click", "rename-tab"),
+    ("New window as Administrator", "", "", "admin-window"),
     ("Next tab", "⌘⇧]", "Ctrl+Tab", "next-tab"),
     ("Previous tab", "⌘⇧[", "Ctrl+Shift+Tab", "prev-tab"),
     ("Next pane", "⌘]", "Ctrl+Shift+]", "next-pane"),
@@ -57,13 +61,18 @@ const ACTIONS: &[(&str, &str, &str, &str)] = &[
 ];
 
 impl Palette {
-    /// `fonts`: installed monospace families.
-    pub fn open(&mut self, fonts: &[String]) {
+    /// `fonts`: installed monospace families. `profiles`: shells a tab can start with.
+    pub fn open(&mut self, fonts: &[String], profiles: &[Profile]) {
         let mac = cfg!(target_os = "macos");
         let mut all: Vec<Entry> = ACTIONS
             .iter()
+            .filter(|a| cfg!(windows) || a.3 != "admin-window")
             .map(|(label, mk, ok, id)| Entry { label: label.to_string(), keys: if mac { mk } else { ok }, id: id.to_string() })
             .collect();
+        all.extend(crate::TAB_COLORS.iter().map(|(name, i)| Entry { label: format!("Tab color: {name}"), keys: "", id: format!("tab-color:{i}") }));
+        all.push(Entry { label: "Tab color: None".into(), keys: "", id: "tab-color:none".into() });
+        all.extend(profiles.iter().map(|p| Entry { label: format!("New tab: {}", p.name), keys: "", id: format!("profile:{}", p.name) }));
+        all.extend(profiles.iter().map(|p| Entry { label: format!("Default profile: {}", p.name), keys: "", id: format!("default-profile:{}", p.name) }));
         all.extend(PRESETS.iter().enumerate().map(|(i, p)| Entry { label: format!("Theme: {}", p.name), keys: "", id: format!("theme:{i}") }));
         all.extend(fonts.iter().map(|f| Entry { label: format!("Font: {f}"), keys: "", id: format!("font:{f}") }));
         *self = Palette { open: true, all, ..Default::default() };
@@ -136,11 +145,13 @@ mod tests {
     #[test]
     fn fuzzy_ranking() {
         let mut p = Palette::default();
-        p.open(&["JetBrains Mono".into()]);
+        p.open(&["JetBrains Mono".into()], &[Profile { name: "Ubuntu".into(), ..Default::default() }]);
         p.query = "ask".into();
         assert_eq!(p.visible()[0].id, "ask-ai");
         p.query = "font jet".into();
         assert_eq!(p.visible()[0].id, "font:JetBrains Mono");
+        p.query = "tab ubu".into();
+        assert_eq!(p.visible()[0].id, "profile:Ubuntu");
         p.query = "splr".into();
         assert_eq!(p.visible()[0].id, "split-right");
         p.query = "zzzz".into();

@@ -20,6 +20,10 @@ pub struct SavedTab {
     pub root: SavedNode,
     /// Index of the focused pane among the tab's leaves, left to right.
     pub focus: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -29,6 +33,9 @@ pub enum SavedNode {
         cwd: Option<PathBuf>,
         /// Run instead of the shell, e.g. "claude --continue".
         command: Option<String>,
+        /// The pane's profile, when it wasn't the default shell (a WSL tab stays WSL).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<crate::config::ShellConfig>,
     },
     Split {
         /// true = side by side.
@@ -101,10 +108,12 @@ mod tests {
                 root: SavedNode::Split {
                     horizontal: true,
                     ratio: 0.4,
-                    a: Box::new(SavedNode::Pane { cwd: Some("/tmp".into()), command: None }),
-                    b: Box::new(SavedNode::Pane { cwd: None, command: resume_command("claude", Some("abc-1")) }),
+                    a: Box::new(SavedNode::Pane { cwd: Some("/tmp".into()), command: None, shell: None }),
+                    b: Box::new(SavedNode::Pane { cwd: None, command: resume_command("claude", Some("abc-1")), shell: Some(crate::config::ShellConfig { program: "wsl.exe".into(), args: vec!["-d".into(), "Ubuntu".into()] }) }),
                 },
                 focus: 1,
+                name: Some("build".into()),
+                color: Some(2),
             }],
         };
         let text = serde_json::to_string(&s).unwrap();

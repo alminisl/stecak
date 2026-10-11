@@ -2373,6 +2373,7 @@ dependencies = [
  "jpeg-decoder",
  "libc",
  "log",
+ "memchr",
  "memmap2",
  "muda",
  "objc2 0.6.5",

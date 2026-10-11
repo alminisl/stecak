@@ -33,6 +33,9 @@ pub enum Action {
     FontBigger,
     FontSmaller,
     FontReset,
+    /// Move the focused pane's divider (see `Node::nudge`).
+    ResizePane(Dir, f32),
+    ZoomPane,
     Write(Vec<u8>),
 }
 
@@ -53,11 +56,25 @@ fn shortcut(event: &KeyEvent, m: ModifiersState) -> Option<Action> {
         Key::Named(NamedKey::PageUp) if m.control_key() && !m.shift_key() => return Some(Action::PrevTab),
         _ => {}
     }
+    // Resize splits: Alt+Shift+arrows like Windows Terminal (Cmd+Ctrl+arrows on macOS, like iTerm2).
+    let mac = cfg!(target_os = "macos");
+    let resize = if mac { m.super_key() && m.control_key() } else { m.alt_key() && m.shift_key() && !m.control_key() };
+    if let Key::Named(named) = &event.logical_key {
+        let step = 0.05;
+        match named {
+            NamedKey::ArrowLeft if resize => return Some(Action::ResizePane(Dir::Horizontal, -step)),
+            NamedKey::ArrowRight if resize => return Some(Action::ResizePane(Dir::Horizontal, step)),
+            NamedKey::ArrowUp if resize => return Some(Action::ResizePane(Dir::Vertical, -step)),
+            NamedKey::ArrowDown if resize => return Some(Action::ResizePane(Dir::Vertical, step)),
+            // Zoom the focused pane: Cmd+Shift+Enter (iTerm2), Ctrl+Shift+Enter elsewhere.
+            NamedKey::Enter if is_app_modifier(m) && (m.shift_key() || !mac) => return Some(Action::ZoomPane),
+            _ => {}
+        }
+    }
     if !is_app_modifier(m) {
         return None;
     }
     let Key::Character(c) = event.key_without_modifiers() else { return None };
-    let mac = cfg!(target_os = "macos");
     // On macOS Shift is a free extra modifier; elsewhere it is part of Ctrl+Shift already.
     let shift = mac && m.shift_key();
     Some(match c.as_str() {

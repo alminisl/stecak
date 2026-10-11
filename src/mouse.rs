@@ -84,7 +84,8 @@ pub fn url_at(term: &Term<Listener>, line: Line, col: usize) -> Option<(usize, u
 /// (start col, end col inclusive, uri), spanning the adjacent cells with the same link.
 pub fn hyperlink_at(term: &Term<Listener>, line: Line, col: usize) -> Option<(usize, usize, String)> {
     let row = &term.grid()[line];
-    let link = row[Column(col)].hyperlink()?;
+    // Sixel image markers are links too, but not ones to open.
+    let link = row[Column(col)].hyperlink().filter(|l| !crate::sixel::is_marker(l.uri()))?;
     let same = |c: usize| row[Column(c)].hyperlink().is_some_and(|h| h.id() == link.id() && h.uri() == link.uri());
     let (mut a, mut b) = (col, col);
     while a > 0 && same(a - 1) {
