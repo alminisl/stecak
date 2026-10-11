@@ -51,6 +51,10 @@ agent:                 # Cmd+Shift+A opens this in a split; Cmd+Shift+S browses 
   command: claude       # or codex
   notifications: true   # macOS notification when an agent needs you
 
+ci:                    # tab bar chip: latest GitHub Actions / GitLab pipeline for the focused pane's branch
+  enabled: true        # token from GH_TOKEN / GITHUB_TOKEN / `gh`, or GITLAB_TOKEN / `glab`
+  gitlab_hosts: []     # self-hosted GitLab, e.g. ["git.company.com"] (gitlab.com is built in)
+
 bosancica:             # Cmd+Shift+B: draw text in the medieval Bosnian script
   enabled: false
   font: BoSanko2       # installed family, or a path to a .ttf/.otf (font not bundled; see README)

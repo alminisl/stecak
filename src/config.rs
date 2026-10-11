@@ -22,6 +22,7 @@ pub struct Config {
     pub default_profile: String,
     pub tabs: TabsConfig,
     pub agent: AgentConfig,
+    pub ci: CiConfig,
     pub background_image: BackgroundImageConfig,
     pub bosancica: BosancicaConfig,
     pub scrollback: usize,
@@ -195,6 +196,23 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct CiConfig {
+    /// Tab bar chip with the latest GitHub Actions / GitLab pipeline status of the focused
+    /// pane's repo and branch. Tokens come from GH_TOKEN / GITHUB_TOKEN / `gh`, or
+    /// GITLAB_TOKEN / `glab`; public repos work without one.
+    pub enabled: bool,
+    /// Self-hosted GitLab servers (e.g. "git.company.com"); gitlab.com is always known.
+    pub gitlab_hosts: Vec<String>,
+}
+
+impl Default for CiConfig {
+    fn default() -> Self {
+        Self { enabled: true, gitlab_hosts: vec![] }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct TabsConfig {
     /// Show the tab bar even when only one tab is open.
     pub always_show: bool,
@@ -211,6 +229,7 @@ impl Default for Config {
             default_profile: String::new(),
             tabs: TabsConfig::default(),
             agent: AgentConfig::default(),
+            ci: CiConfig::default(),
             background_image: BackgroundImageConfig::default(),
             bosancica: BosancicaConfig::default(),
             scrollback: 2_000,

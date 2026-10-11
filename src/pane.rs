@@ -54,6 +54,8 @@ pub enum UserEvent {
     Submit(PaneId),
     /// `/context` finished for a folder (None if it failed).
     ContextBreakdown(std::path::PathBuf, Option<crate::context::Breakdown>),
+    /// CI status for a folder's repo (None: not a GitHub/GitLab repo, or the request failed).
+    Ci(std::path::PathBuf, Option<crate::ci::Status>),
 }
 
 pub struct GridSize {

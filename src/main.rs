@@ -13,6 +13,7 @@
 mod agents;
 mod ai;
 mod bgimage;
+mod ci;
 mod browser;
 mod config;
 mod context;
@@ -120,6 +121,17 @@ const PROFILES_W: f32 = 1.5;
 const TAB_COLORS: [(&str, usize); 6] = [("Red", 1), ("Green", 2), ("Yellow", 3), ("Blue", 4), ("Magenta", 5), ("Cyan", 6)];
 
 /// The Claude Code session the context bar is showing.
+/// CI chip: the focused pane's folder, when it was last looked up and asked about, whether a
+/// request is in flight, and the answer.
+#[derive(Default)]
+struct CiState {
+    cwd: Option<PathBuf>,
+    checked: Option<Instant>,
+    asked: Option<Instant>,
+    waiting: bool,
+    status: Option<ci::Status>,
+}
+
 struct ContextState {
     session: String,
     cwd: PathBuf,
@@ -239,6 +251,7 @@ struct App {
     context: Option<ContextState>,
     context_checked: Option<(Instant, usize, Option<PaneId>, bool)>,
     context_hover: bool,
+    ci: CiState,
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
     claude_busy: HashMap<PaneId, (Instant, Option<bool>)>,
@@ -327,6 +340,7 @@ impl App {
             context: None,
             context_checked: None,
             context_hover: false,
+            ci: CiState::default(),
             breakdowns: HashMap::new(),
             claude_busy: HashMap::new(),
             animating: false,
@@ -706,6 +720,43 @@ impl App {
             t.context_bar = want;
             self.resize_all();
         }
+    }
+
+    /// Keep the CI chip current: every 15 s while a run is going, else every 60 s while the
+    /// window is focused. Returns when to check again.
+    fn poll_ci(&mut self) -> Option<Instant> {
+        if !self.config.ci.enabled {
+            if self.ci.status.take().is_some() {
+                self.mark_dirty();
+            }
+            return None;
+        }
+        // Re-read the focused folder at most every 2 s (on macOS/Linux it's a process query).
+        let now = Instant::now();
+        if self.ci.checked.is_none_or(|t| now - t >= Duration::from_secs(2)) {
+            self.ci.checked = Some(now);
+            let cwd = self.focused_pane().and_then(|p| p.cwd());
+            if cwd != self.ci.cwd {
+                self.ci = CiState { cwd, checked: Some(now), ..Default::default() };
+                self.mark_dirty();
+            }
+        }
+        // A new folder is looked up once; after that, refresh only while you're looking (or a
+        // run is going, so its end can be notified).
+        let running = self.ci.status.as_ref().is_some_and(|s| s.state == ci::State::Running);
+        if self.ci.asked.is_some() && !running && (!self.focused || self.occluded) {
+            return None;
+        }
+        let every = Duration::from_secs(if running { 15 } else { 60 });
+        let due = self.ci.asked.map_or(now, |t| t + every);
+        if now >= due && !self.ci.waiting {
+            if let Some(cwd) = self.ci.cwd.clone() {
+                self.ci.asked = Some(now);
+                self.ci.waiting = true;
+                ci::fetch_async(cwd, self.config.ci.gitlab_hosts.clone(), self.proxy.clone());
+            }
+        }
+        Some(now + Duration::from_secs(2))
     }
 
     /// Paste `text` into the tab's agent (opening one in a split if there's none), and press
@@ -1870,6 +1921,10 @@ impl App {
         if button != MouseButton::Left {
             return;
         }
+        if let Some(s) = self.ci.status.as_ref().filter(|_| x >= win_w - 2.0 * plus_w && x < win_w - plus_w) {
+            mouse::open_url(&s.url);
+            return;
+        }
         if x >= win_w - plus_w {
             // ⚙ at the far right: settings (where the config file and shortcuts are).
             self.settings.toggle();
@@ -2152,6 +2207,16 @@ impl App {
             }
             let gear_x = win_w - plus_w;
             r.text("⚙", gear_x + (plus_w - cw) / 2.0, text_y, win_w, rgba(theme.fg, 0.6));
+            if let Some(s) = &self.ci.status {
+                // CI chip left of ⚙. A steady dot while running: no animation, so no extra frames.
+                let (glyph, color) = match s.state {
+                    ci::State::Running => ("●", rgba(theme.palette[3], 1.0)),
+                    ci::State::Passed => ("✓", rgba(theme.palette[2], 1.0)),
+                    ci::State::Failed => ("✗", rgba(theme.palette[1], 1.0)),
+                    ci::State::Other => ("○", rgba(theme.fg, 0.5)),
+                };
+                r.text(glyph, gear_x - plus_w + (plus_w - cw) / 2.0, text_y, gear_x, color);
+            }
         }
 
         self.update_buttons = self.update.as_ref().and_then(|u| {
@@ -2739,6 +2804,9 @@ impl ApplicationHandler<UserEvent> for App {
                 at(now + Duration::from_millis(16));
             }
         }
+        if let Some(t) = self.poll_ci() {
+            at(t);
+        }
         if self.access_on && self.access_dirty {
             let due = self.access_at + ACCESS_EVERY;
             if now >= due {
@@ -2932,6 +3000,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
 
+            UserEvent::Ci(cwd, status) => {
+                if self.ci.cwd.as_ref() != Some(&cwd) {
+                    return;
+                }
+                self.ci.waiting = false;
+                let was = self.ci.status.as_ref().map(|s| s.state);
+                if let Some(s) = status.as_ref().filter(|s| was == Some(ci::State::Running) && s.state != ci::State::Running && !self.focused) {
+                    let verdict = match s.state {
+                        ci::State::Passed => "passed",
+                        ci::State::Failed => "failed",
+                        _ => "finished",
+                    };
+                    desktop_notification(&s.name, &format!("CI {verdict}"));
+                }
+                if self.ci.status != status {
+                    self.ci.status = status;
+                    self.mark_dirty();
+                }
+            }
             UserEvent::ContextBreakdown(cwd, breakdown) => {
                 // On failure keep the previous breakdown (if any); retried after 10 minutes.
                 let entry = self.breakdowns.entry(cwd).or_insert((Instant::now(), None));
