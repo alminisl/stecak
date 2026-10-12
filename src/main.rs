@@ -120,7 +120,7 @@ const ACCESS_EVERY: Duration = Duration::from_millis(250);
 /// takes the terminal lock away from the parser. Input and resizes still redraw at once.
 const OUTPUT_FRAME: Duration = Duration::from_millis(8);
 /// Width of the "▾" profile button right of "+", in cells.
-const PROFILES_W: f32 = 1.5;
+const PROFILES_W: f32 = 2.0;
 const TAB_COLORS: [(&str, usize); 6] = [("Red", 1), ("Green", 2), ("Yellow", 3), ("Blue", 4), ("Magenta", 5), ("Cyan", 6)];
 
 /// The Claude Code session the context bar is showing.
@@ -727,11 +727,21 @@ impl App {
                 }
             }
         }
-        let want = self.context.is_some();
+        self.sync_bottom_bar();
+    }
+
+    /// The bar under the panes shows while there's a context bar or a CI status to show.
+    fn sync_bottom_bar(&mut self) {
+        let want = self.context.is_some() || self.ci.status.is_some();
         if let Some(t) = self.tabs.get_mut(self.active).filter(|t| t.context_bar != want) {
             t.context_bar = want;
             self.resize_all();
         }
+    }
+
+    /// Width of the CI chip at the left of the bottom bar (0 without one).
+    fn ci_chip_w(&self) -> f32 {
+        self.ci.status.as_ref().map_or(0.0, |s| (ci_label(s).0.chars().count() as f32 + 2.0) * self.r().cell().0)
     }
 
     /// Keep the CI chip current: every 15 s while a run is going, else every 60 s while the
@@ -1492,6 +1502,18 @@ impl App {
             "tab" => self.new_tab(),
             "pane" => self.cycle_pane(1),
             "goto" => self.handle_action(Action::SelectTab(arg.parse().unwrap_or(0)), event_loop),
+            "ci-mock" => {
+                // Fake a CI status to see the chip: running | passed | failed | other.
+                let state = match arg {
+                    "running" => ci::State::Running,
+                    "failed" => ci::State::Failed,
+                    "other" => ci::State::Other,
+                    _ => ci::State::Passed,
+                };
+                self.ci.status = Some(ci::Status { state, url: "https://github.com/alminisl/stecak/actions".into(), name: "CI".into() });
+                self.sync_bottom_bar();
+                self.mark_dirty();
+            }
             "type" => self.handle_action(Action::Write(arg.replace("\\n", "\r").into_bytes()), event_loop),
             "find" | "find-re" => {
                 self.search.use_regex = cmd == "find-re";
@@ -1705,6 +1727,10 @@ impl App {
                 return self.update_action(primary.contains(x, y), event_loop);
             }
         }
+        if let Some(s) = self.ci.status.as_ref().filter(|_| x < self.ci_chip_w() && y >= self.r().size().1 - self.context_bar_h(self.active)) {
+            mouse::open_url(&s.url);
+            return;
+        }
         if self.sessions.open {
             match self.sessions_layout {
                 Some((panel, y0, lh, first)) if panel.contains(x, y) => {
@@ -1857,14 +1883,14 @@ impl App {
         let (x, y) = self.mouse;
         let hover_tab = (y >= self.titlebar_h() && y < self.tab_bar_h()).then(|| {
             let strip = self.tab_bar_h() - self.titlebar_h();
-            let tab_w = ((self.r().size().0 - strip) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
+            let tab_w = tab_width(self.r().size().0, strip, self.r().cell().0, self.r().scale, self.tabs.len());
             (x / tab_w) as usize
         });
         if hover_tab != self.hover_tab {
             self.hover_tab = hover_tab;
             self.mark_dirty();
         }
-        let over_context = self.context.is_some() && y >= self.r().size().1 - self.context_bar_h(self.active);
+        let over_context = self.context.is_some() && y >= self.r().size().1 - self.context_bar_h(self.active) && x >= self.ci_chip_w();
         if over_context != self.context_hover {
             self.context_hover = over_context;
             self.mark_dirty();
@@ -1918,7 +1944,7 @@ impl App {
     fn on_tab_bar_click(&mut self, x: f32, button: MouseButton, event_loop: &ActiveEventLoop) {
         let (win_w, _) = self.r().size();
         let plus_w = self.tab_bar_h() - self.titlebar_h();
-        let tab_w = ((win_w - plus_w) / self.tabs.len().max(1) as f32).min(260.0 * self.r().scale);
+        let tab_w = tab_width(win_w, plus_w, self.r().cell().0, self.r().scale, self.tabs.len());
         let plus_x = tab_w * self.tabs.len() as f32;
         // "▾" right of "+" (or right-clicking "+") lists the profiles.
         if x >= plus_x && x < plus_x + plus_w + PROFILES_W * self.r().cell().0 && (button == MouseButton::Right || x >= plus_x + plus_w) {
@@ -1933,10 +1959,6 @@ impl App {
             return;
         }
         if button != MouseButton::Left {
-            return;
-        }
-        if let Some(s) = self.ci.status.as_ref().filter(|_| x >= win_w - 2.0 * plus_w && x < win_w - plus_w) {
-            mouse::open_url(&s.url);
             return;
         }
         if x >= win_w - plus_w {
@@ -2152,9 +2174,19 @@ impl App {
             let d = d.rect;
             r.rect(d.x, d.y, d.w, d.h, rgba(theme.tab_active, 1.0));
         }
+        let chip = self.ci.status.as_ref().map(ci_label);
+        let chip_w = chip.as_ref().map_or(0.0, |c| (c.0.chars().count() as f32 + 2.0) * cw);
         if let Some(c) = &self.context {
             let breakdown = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
-            draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover);
+            draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover, chip_w);
+        } else if chip.is_some() {
+            let h = (ch * 1.5).round();
+            r.rect(0.0, win_h - h, win_w, h, rgba(theme.tab_bar, 0.97));
+            r.rect(0.0, win_h - h, win_w, r.scale.max(1.0), rgba(theme.fg, 0.08));
+        }
+        if let Some((label, color)) = chip {
+            let h = (ch * 1.5).round();
+            r.text(&label, cw, win_h - h + ((h - ch) / 2.0).round(), chip_w, rgba(color(theme), 1.0));
         }
 
         // Tab bar.
@@ -2163,7 +2195,7 @@ impl App {
             r.rect(0.0, 0.0, win_w, tab_bar_h, rgba(theme.tab_bar, opacity.max(0.92)));
             let strip_h = tab_bar_h - title_h;
             let plus_w = strip_h;
-            let tab_w = ((win_w - plus_w) / tabs.len().max(1) as f32).min(260.0 * r.scale);
+            let tab_w = tab_width(win_w, plus_w, cw, r.scale, tabs.len());
             let text_y = (title_h + (strip_h - ch) / 2.0).round();
             for (i, tab) in tabs.iter().enumerate() {
                 let x = i as f32 * tab_w;
@@ -2220,20 +2252,10 @@ impl App {
             let plus_x = tab_w * tabs.len() as f32;
             r.text("+", plus_x + (plus_w - cw) / 2.0, text_y, plus_x + plus_w, rgba(theme.fg, 0.7));
             if cfg!(not(target_os = "linux")) {
-                r.text("▾", plus_x + plus_w - cw * 0.25, text_y, plus_x + plus_w + PROFILES_W * cw, rgba(theme.fg, 0.5));
+                r.text("▼", plus_x + plus_w + (PROFILES_W - 1.0) * cw / 2.0, text_y, plus_x + plus_w + PROFILES_W * cw, rgba(theme.fg, 0.55));
             }
             let gear_x = win_w - plus_w;
             r.text("⚙", gear_x + (plus_w - cw) / 2.0, text_y, win_w, rgba(theme.fg, 0.6));
-            if let Some(s) = &self.ci.status {
-                // CI chip left of ⚙. A steady dot while running: no animation, so no extra frames.
-                let (glyph, color) = match s.state {
-                    ci::State::Running => ("●", rgba(theme.palette[3], 1.0)),
-                    ci::State::Passed => ("✓", rgba(theme.palette[2], 1.0)),
-                    ci::State::Failed => ("✗", rgba(theme.palette[1], 1.0)),
-                    ci::State::Other => ("○", rgba(theme.fg, 0.5)),
-                };
-                r.text(glyph, gear_x - plus_w + (plus_w - cw) / 2.0, text_y, gear_x, color);
-            }
         }
 
         self.update_buttons = self.update.as_ref().and_then(|u| {
@@ -2611,7 +2633,19 @@ fn category_color(theme: &Theme, name: &str) -> [f32; 3] {
 
 /// The context bar under the panes: how full the Claude Code session's context window is,
 /// split by category, with the full breakdown in a panel while the mouse is over it.
-fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)>, b: Option<&context::Breakdown>, hover: bool) {
+/// The CI chip's text ("✓ CI passed") and color.
+fn ci_label(s: &ci::Status) -> (String, fn(&Theme) -> [f32; 3]) {
+    let (glyph, verdict, color): (_, _, fn(&Theme) -> [f32; 3]) = match s.state {
+        ci::State::Running => ("●", "running", |t| t.palette[3]),
+        ci::State::Passed => ("✓", "passed", |t| t.palette[2]),
+        ci::State::Failed => ("✗", "failed", |t| t.palette[1]),
+        ci::State::Other => ("○", "cancelled", |t| t.fg),
+    };
+    (format!("{glyph} {} {verdict}", s.name), color)
+}
+
+/// `x0`: where it starts (right of the CI chip, if any).
+fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)>, b: Option<&context::Breakdown>, hover: bool, x0: f32) {
     let (cw, ch) = r.cell();
     let (win_w, win_h) = r.size();
     let h = (ch * 1.5).round();
@@ -2627,7 +2661,7 @@ fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)
     r.rect(0.0, y, win_w, r.scale.max(1.0), rgba(theme.fg, 0.08));
 
     let amber = theme.palette[3];
-    r.text("✻ Context", cw, ty, win_w, rgba(amber, 1.0));
+    r.text("✻ Context", x0 + cw, ty, win_w, rgba(amber, 1.0));
     let mut right = format!("{} / {}  {:.0}%", context::short(tokens), context::short(window), tokens as f32 / window as f32 * 100.0);
     if buffer > 0 {
         right += &format!(" · {:.0}% to compact", ((1.0 - full) * 100.0).max(0.0));
@@ -2637,7 +2671,7 @@ fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)
     r.text(&right, rx, ty, win_w, rgba(color, if full > 0.6 { 1.0 } else { 0.7 }));
 
     // The bar: one segment per category, the autocompact buffer reserved at the right end.
-    let (x0, x1) = (11.0 * cw, rx - 2.0 * cw);
+    let (x0, x1) = (x0 + 11.0 * cw, rx - 2.0 * cw);
     if x1 > x0 + 4.0 * cw {
         let bh = (ch * 0.45).round();
         let by = y + ((h - bh) / 2.0).round();
@@ -2755,6 +2789,13 @@ fn draw_palette(r: &mut Renderer, theme: &Theme, p: &palette::Palette) -> (Rect,
         r.text(e.keys, kx, ry + dy, x + w - pad, rgba(theme.palette[3], if selected { 1.0 } else { 0.7 }));
     }
     (Rect { x, y, w, h }, y0, lh, first)
+}
+
+/// Tab width: tabs share the bar, leaving room for "+", "▾" and ⚙ (each button is
+/// `button_w` wide, "▾" PROFILES_W cells), and stop growing at 260 pt.
+fn tab_width(win_w: f32, button_w: f32, cw: f32, scale: f32, tabs: usize) -> f32 {
+    let profiles = if cfg!(target_os = "linux") { 0.0 } else { PROFILES_W * cw };
+    ((win_w - 2.0 * button_w - profiles) / tabs.max(1) as f32).min(260.0 * scale)
 }
 
 /// Native notification. shortcut: shells out to osascript/notify-send instead of linking a
@@ -3055,6 +3096,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.ci.status != status {
                     self.ci.status = status;
+                    self.sync_bottom_bar();
                     self.mark_dirty();
                 }
             }
