@@ -328,7 +328,7 @@ impl Pane {
     /// Name of the pane's foreground process (e.g. "claude" while an agent runs).
     pub fn foreground_process(&self) -> Option<String> {
         #[cfg(unix)]
-        return self.master.process_group_leader().and_then(crate::agents::process_name);
+        return self.master.process_group_leader().map(crate::agents::foreground_job).and_then(crate::agents::process_name);
         #[cfg(windows)]
         return crate::agents::foreground(self.child.process_id()?).map(|p| p.1);
         #[cfg(not(any(unix, windows)))]
@@ -338,7 +338,7 @@ impl Pane {
     /// Pid of the pane's foreground process (the agent, while one runs).
     pub fn foreground_pid(&self) -> Option<i32> {
         #[cfg(unix)]
-        return self.master.process_group_leader();
+        return self.master.process_group_leader().map(crate::agents::foreground_job);
         #[cfg(windows)]
         return crate::agents::foreground(self.child.process_id()?).map(|p| p.0 as i32);
         #[cfg(not(any(unix, windows)))]

@@ -210,6 +210,33 @@ fn user_text(content: &serde_json::Value) -> Option<String> {
     Some(text.lines().next().unwrap_or(text).chars().take(120).collect())
 }
 
+/// The pid to treat as a PTY's foreground job, given its process group leader. A pane started
+/// with a command (a restored `zsh -lc "claude --resume …; exec $SHELL -l"`) runs it without
+/// job control, inside the shell's own group, so the leader is the shell: look through it to
+/// the child sharing its group.
+#[cfg(unix)]
+pub fn foreground_job(leader: i32) -> i32 {
+    let is_shell = process_name(leader).is_some_and(|n| matches!(n.trim_start_matches('-'), "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh"));
+    if !is_shell {
+        return leader;
+    }
+    // SAFETY: getpgid only reads the process table.
+    child_pids(leader).into_iter().filter(|&c| unsafe { libc::getpgid(c) } == leader).max().unwrap_or(leader)
+}
+
+#[cfg(target_os = "macos")]
+fn child_pids(pid: i32) -> Vec<i32> {
+    let mut buf = [0i32; 64];
+    // SAFETY: proc_listchildpids writes at most buf's size in bytes and returns the pid count.
+    let n = unsafe { libc::proc_listchildpids(pid, buf.as_mut_ptr().cast(), std::mem::size_of_val(&buf) as i32) };
+    buf[..n.clamp(0, buf.len() as i32) as usize].to_vec()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn child_pids(pid: i32) -> Vec<i32> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default().split_whitespace().filter_map(|p| p.parse().ok()).collect()
+}
+
 /// Name of the foreground process of a PTY (e.g. "claude", "codex", "zsh").
 #[cfg(target_os = "macos")]
 pub fn process_name(pid: i32) -> Option<String> {
@@ -324,6 +351,22 @@ pub fn is_agent(process: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn looks_through_a_shell_running_a_command() {
+        use std::os::unix::process::CommandExt;
+        let mut sh = std::process::Command::new("/bin/sh").args(["-c", "sleep 5; :"]).process_group(0).spawn().unwrap();
+        let leader = sh.id() as i32;
+        let mut job = leader;
+        for _ in 0..50 {
+            job = foreground_job(leader);
+            if job != leader { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        sh.kill().ok();
+        assert_eq!(process_name(job).as_deref(), Some("sleep"));
+    }
+
     use super::*;
 
     #[test]
