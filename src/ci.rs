@@ -106,7 +106,12 @@ fn token(kind: &str, host: &str) -> Option<Option<String>> {
             (&["GITLAB_TOKEN"], vec!["glab", "config", "get", "token", "--host", host])
         };
         vars.iter().find_map(|v| std::env::var(v).ok().filter(|t| !t.is_empty())).or_else(|| {
-            let out = crate::ai::no_console(Command::new(cli[0]).args(&cli[1..])).stderr(Stdio::null()).output().ok()?;
+            let mut cmd = Command::new(cli[0]);
+            // Started from the Dock, macOS apps get a bare PATH without Homebrew's gh / glab.
+            if let Some(path) = crate::ai::user_path().filter(|_| cfg!(unix)) {
+                cmd.env("PATH", path);
+            }
+            let out = crate::ai::no_console(cmd.args(&cli[1..])).stderr(Stdio::null()).output().ok()?;
             let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
             (out.status.success() && !t.is_empty()).then_some(t)
         })
