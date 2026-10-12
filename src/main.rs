@@ -115,6 +115,9 @@ const FLASH: f32 = 0.15;
 /// Colors offered for tabs: (name, index into the theme's ANSI palette).
 /// Screen readers get the screen text at most this often (fast output would flood them).
 const ACCESS_EVERY: Duration = Duration::from_millis(250);
+/// Output redraws come at most this often (~120 fps): during a flood, drawing faster only
+/// takes the terminal lock away from the parser. Input and resizes still redraw at once.
+const OUTPUT_FRAME: Duration = Duration::from_millis(8);
 /// Width of the "▾" profile button right of "+", in cells.
 const PROFILES_W: f32 = 1.5;
 const TAB_COLORS: [(&str, usize); 6] = [("Red", 1), ("Green", 2), ("Yellow", 3), ("Blue", 4), ("Magenta", 5), ("Cyan", 6)];
@@ -242,6 +245,9 @@ struct App {
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
     claude_busy: HashMap<PaneId, (Instant, Option<bool>)>,
+    /// The agent running in each pane, if any, re-checked at most twice a second: on Windows
+    /// the lookup snapshots every process (~13 ms), far too slow for every frame.
+    agent_names: HashMap<PaneId, (Instant, Option<String>)>,
     /// The macOS menu bar; must stay alive for the app's lifetime.
     #[cfg(target_os = "macos")]
     _menu: Option<muda::Menu>,
@@ -252,6 +258,9 @@ struct App {
     bg_gen: Arc<AtomicU64>,
     /// Set by PTY reader threads when they've sent a wakeup that hasn't been drawn yet.
     wakeup_pending: Arc<AtomicBool>,
+    last_frame: Instant,
+    /// An output redraw held back until OUTPUT_FRAME after the last frame.
+    redraw_at: Option<Instant>,
 
     /// Something other than terminal output changed (input, layout, overlay…): must present.
     dirty: bool,
@@ -329,9 +338,12 @@ impl App {
             context_hover: false,
             breakdowns: HashMap::new(),
             claude_busy: HashMap::new(),
+            agent_names: HashMap::new(),
             animating: false,
             bg_gen: Arc::new(AtomicU64::new(0)),
             wakeup_pending: Arc::new(AtomicBool::new(false)),
+            last_frame: Instant::now(),
+            redraw_at: None,
             dirty: true,
             stats: Stats { enabled: std::env::var_os("STECAK_STATS").is_some(), ..Default::default() },
         }
@@ -1948,6 +1960,9 @@ impl App {
 
     fn draw(&mut self) {
         let t0 = Instant::now();
+        // This frame shows all output so far, so a held-back output redraw is no longer needed.
+        self.last_frame = t0;
+        self.redraw_at = None;
         // Anything worth redrawing may have changed the text a screen reader sees.
         self.access_dirty |= self.access_on;
         self.poll_context();
@@ -2237,10 +2252,19 @@ impl App {
             t.root.leaves(&mut ids);
         }
         self.claude_busy.retain(|id, _| self.panes.contains_key(id));
+        self.agent_names.retain(|id, _| self.panes.contains_key(id));
         let mut working = HashSet::new();
         for id in ids {
             let Some(p) = self.panes.get(&id) else { continue };
-            let Some(name) = p.foreground_process().filter(|n| agents::is_agent(n)) else { continue };
+            let name = match self.agent_names.get(&id) {
+                Some((t, name)) if t.elapsed() < Duration::from_millis(500) => name.clone(),
+                _ => {
+                    let name = p.foreground_process().filter(|n| agents::is_agent(n));
+                    self.agent_names.insert(id, (Instant::now(), name.clone()));
+                    name
+                }
+            };
+            let Some(name) = name else { continue };
             let printing = now.saturating_sub(p.last_output.load(Ordering::Acquire)) < 1500;
             let busy = if name.contains("claude") {
                 let busy = match self.claude_busy.get(&id) {
@@ -2739,6 +2763,16 @@ impl ApplicationHandler<UserEvent> for App {
                 at(now + Duration::from_millis(16));
             }
         }
+        if let Some(t) = self.redraw_at {
+            if now >= t {
+                self.redraw_at = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            } else {
+                at(t);
+            }
+        }
         if self.access_on && self.access_dirty {
             let due = self.access_at + ACCESS_EVERY;
             if now >= due {
@@ -2877,7 +2911,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Wakeup => {
-                if let Some(w) = &self.window {
+                let due = self.last_frame + OUTPUT_FRAME;
+                if Instant::now() < due {
+                    self.redraw_at = Some(due);
+                } else if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
