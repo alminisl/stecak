@@ -116,7 +116,7 @@ Windows, so throughput is `type` of the same 34 MB colored file, timed inside th
 |---|---|---|
 | Launch to shell running (median of 5) | **~100 ms** | ~385 ms |
 | `type` 34 MB colored text (median of 5–6) | ~21 s | ~19 s |
-| CPU used during that run | ~25 s Stećak + ~11 s OpenConsole | ~7 s WindowsTerminal (OpenConsole not captured) |
+| CPU used during that run | ~6 s Stećak + ~9 s OpenConsole | ~7 s WindowsTerminal (OpenConsole not captured) |
 | Memory, idle, 1 pane (private bytes, incl. OpenConsole) | 119 MB | 81 MB |
 | Idle CPU | 0 ms over 10 s | 0 ms over 10 s |
 
@@ -124,8 +124,7 @@ What the numbers say:
 - **Throughput is capped by ConPTY**, at about 1.8 MB/s for both terminals. Every byte goes through
   OpenConsole before either terminal sees it, and turning ligatures off didn't change Stećak's
   time. Runs vary by ±20%, and one Stećak run took 84 s.
-- **Stećak redraws the screen live during a flood** (about 80 fps, ~11 ms to rebuild 30 uncached
-  rows), which is where its extra CPU goes.
+- **Stećak redraws the screen live during a flood** at up to 120 fps, under 1 ms per frame.
 - **Memory is higher than on macOS** (33 MB there). The same code on DX12, on this AMD driver,
   commits far more than Metal does, most likely in the driver. Windows Terminal draws with Direct3D 11.
 
