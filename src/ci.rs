@@ -1,5 +1,5 @@
 //! CI status for the focused pane's repo: the latest GitHub Actions runs or GitLab pipeline on
-//! its current branch, shown as a chip in the tab bar.
+//! its current branch, shown as an icon in the bottom bar with every run listed on hover.
 //!
 //! shortcut: shells out to git and curl (like the update check) instead of linking git and an
 //! HTTP/TLS stack; no ETags, so every poll counts against the API rate limit.
@@ -28,6 +28,16 @@ pub struct Status {
     pub url: String,
     /// Workflow name, or "Pipeline".
     pub name: String,
+    /// Every run of the newest commit (one per workflow), for the hover list.
+    pub runs: Vec<Run>,
+}
+
+/// One workflow run (GitHub) or the pipeline (GitLab).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub name: String,
+    pub state: State,
+    pub url: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -152,7 +162,15 @@ fn github_status(v: &serde_json::Value) -> Option<Status> {
         _ => State::Running,
     };
     let pick = [State::Failed, State::Running, State::Passed, State::Other].into_iter().find_map(|s| same.iter().find(|r| state_of(r) == s))?;
-    Some(Status { state: state_of(pick), url: pick["html_url"].as_str()?.to_string(), name: pick["name"].as_str().unwrap_or("Workflow").to_string() })
+    let name = |r: &serde_json::Value| r["name"].as_str().unwrap_or("Workflow").to_string();
+    // Newest first, so a re-run shadows the older run of the same workflow.
+    let mut runs: Vec<Run> = vec![];
+    for r in &same {
+        if !runs.iter().any(|x| x.name == name(r)) {
+            runs.push(Run { name: name(r), state: state_of(r), url: r["html_url"].as_str().unwrap_or_default().to_string() });
+        }
+    }
+    Some(Status { state: state_of(pick), url: pick["html_url"].as_str()?.to_string(), name: name(pick), runs })
 }
 
 fn gitlab_status(v: &serde_json::Value) -> Option<Status> {
@@ -163,7 +181,8 @@ fn gitlab_status(v: &serde_json::Value) -> Option<Status> {
         "created" | "waiting_for_resource" | "preparing" | "pending" | "running" => State::Running,
         _ => State::Other,
     };
-    Some(Status { state, url: p["web_url"].as_str()?.to_string(), name: "Pipeline".into() })
+    let url = p["web_url"].as_str()?.to_string();
+    Some(Status { state, runs: vec![Run { name: "Pipeline".into(), state, url: url.clone() }], url, name: "Pipeline".into() })
 }
 
 #[cfg(test)]
@@ -188,7 +207,9 @@ mod tests {
     fn reads_statuses() {
         let run = |sha: &str, status: &str, conclusion: Option<&str>, name: &str| json!({"head_sha": sha, "status": status, "conclusion": conclusion, "name": name, "html_url": format!("u/{name}")});
         let v = json!({"workflow_runs": [run("b", "completed", Some("success"), "ci"), run("b", "in_progress", None, "release"), run("a", "completed", Some("failure"), "old")]});
-        assert_eq!(github_status(&v).map(|s| (s.state, s.name)), Some((State::Running, "release".into())));
+        let s = github_status(&v).unwrap();
+        assert_eq!((s.state, s.name.as_str()), (State::Running, "release"));
+        assert_eq!(s.runs.iter().map(|r| (r.name.as_str(), r.state)).collect::<Vec<_>>(), [("ci", State::Passed), ("release", State::Running)]);
         let v = json!({"workflow_runs": [run("b", "completed", Some("success"), "ci"), run("a", "completed", Some("failure"), "old")]});
         assert_eq!(github_status(&v).map(|s| s.state), Some(State::Passed));
         assert_eq!(github_status(&json!({"workflow_runs": []})), None);
