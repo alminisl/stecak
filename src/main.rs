@@ -18,6 +18,7 @@ mod browser;
 mod config;
 mod context;
 mod draw;
+mod herdr;
 mod input;
 mod layout;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -92,6 +93,8 @@ struct Tab {
     /// Room is kept for the context bar (a Claude Code session was seen in this tab). Per
     /// tab, so switching tabs never resizes panes, which would make idle agents redraw.
     context_bar: bool,
+    /// Room is kept for the Herdr agent strip above the context bar.
+    herdr: bool,
     /// Set by renaming the tab; None = the focused pane's title.
     name: Option<String>,
     /// Index into the theme's ANSI palette (1 red … 6 cyan).
@@ -102,7 +105,7 @@ struct Tab {
 
 impl Tab {
     fn new(root: Node, focus: PaneId) -> Self {
-        Tab { root, focus, context_bar: false, name: None, color: None, zoomed: false }
+        Tab { root, focus, context_bar: false, herdr: false, name: None, color: None, zoomed: false }
     }
 }
 
@@ -258,6 +261,9 @@ struct App {
     /// The mouse is over the CI icon or its run list; the list's (panel, first row y, row height).
     ci_hover: bool,
     ci_panel: Option<(Rect, f32, f32)>,
+    /// Herdr's agents while Herdr runs in the active tab, and whether a snapshot is on its way.
+    herdr: Option<Vec<herdr::Agent>>,
+    herdr_waiting: bool,
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
     claude_busy: HashMap<PaneId, (Instant, Option<bool>)>,
@@ -355,6 +361,8 @@ impl App {
             ci_hover: false,
             ci_panel: None,
             ci: CiState::default(),
+            herdr: None,
+            herdr_waiting: false,
             breakdowns: HashMap::new(),
             claude_busy: HashMap::new(),
             agent_names: HashMap::new(),
@@ -387,7 +395,12 @@ impl App {
 
     /// The context bar under tab `tab`'s panes, while it has a Claude Code session.
     fn context_bar_h(&self, tab: usize) -> f32 {
-        if self.tabs.get(tab).is_some_and(|t| t.context_bar) { (self.r().cell().1 * 1.5).round() } else { 0.0 }
+        self.tabs.get(tab).map_or(0.0, |t| self.bar_row_h() * (t.context_bar as u8 + t.herdr as u8) as f32)
+    }
+
+    /// One row of the bar under the panes (context bar and CI chip, or the Herdr strip).
+    fn bar_row_h(&self) -> f32 {
+        (self.r().cell().1 * 1.5).round()
     }
 
     /// Geometry of every pane in tab `tab`.
@@ -681,21 +694,30 @@ impl App {
         ids.into_iter().find(|&id| self.is_agent_pane(id))
     }
 
-    /// The Claude Code pane in the active tab (the focused one first): (session id, folder).
-    fn claude_in_tab(&self) -> Option<(String, PathBuf)> {
-        let t = self.tabs.get(self.active)?;
+    /// The Claude Code pane in the active tab (the focused one first): (session id, folder),
+    /// and whether Herdr was seen on the way (its focused agent counts as the Claude pane).
+    fn claude_in_tab(&self) -> (Option<(String, PathBuf)>, bool) {
+        let Some(t) = self.tabs.get(self.active) else { return (None, false) };
         let mut ids = vec![];
         t.root.leaves(&mut ids);
         ids.sort_by_key(|&id| id != t.focus);
-        ids.into_iter().find_map(|id| {
+        let mut herdr = false;
+        let found = ids.into_iter().find_map(|id| {
             let p = self.panes.get(&id)?;
-            if !p.foreground_process()?.to_lowercase().contains("claude") {
+            let name = p.foreground_process()?.to_lowercase();
+            if name.contains("herdr") {
+                herdr = true;
+                let a = self.herdr.as_ref()?.iter().find(|a| a.focused)?;
+                return Some((a.session.clone()?, a.cwd.clone()));
+            }
+            if !name.contains("claude") {
                 return None;
             }
             let (session, cwd) = agents::claude_session(p.foreground_pid()?)?;
             let cwd = if cwd.as_os_str().is_empty() { p.cwd()? } else { cwd };
             Some((session, cwd))
-        })
+        });
+        (found, herdr)
     }
 
     /// Refresh the context bar: at most once a second (or right away when the tab, focus or
@@ -707,7 +729,16 @@ impl App {
             return;
         }
         self.context_checked = Some((Instant::now(), key.0, key.1, key.2));
-        match enabled.then(|| self.claude_in_tab()).flatten() {
+        let (found, herdr_here) = if enabled { self.claude_in_tab() } else { (None, false) };
+        if !herdr_here {
+            if self.herdr.take().is_some() {
+                self.dirty = true;
+            }
+        } else if !self.herdr_waiting {
+            self.herdr_waiting = true;
+            herdr::fetch_async(self.proxy.clone());
+        }
+        match found {
             None => self.context = None,
             Some((session, cwd)) => {
                 if self.context.as_ref().is_none_or(|c| c.session != session) {
@@ -738,8 +769,10 @@ impl App {
     /// The bar under the panes shows while there's a context bar or a CI status to show.
     fn sync_bottom_bar(&mut self) {
         let want = self.context.is_some() || self.ci.status.is_some();
-        if let Some(t) = self.tabs.get_mut(self.active).filter(|t| t.context_bar != want) {
+        let strip = self.herdr.as_ref().is_some_and(|a| !a.is_empty());
+        if let Some(t) = self.tabs.get_mut(self.active).filter(|t| (t.context_bar, t.herdr) != (want, strip)) {
             t.context_bar = want;
+            t.herdr = strip;
             self.resize_all();
         }
     }
@@ -750,7 +783,7 @@ impl App {
     }
 
     fn over_ci_icon(&self, x: f32, y: f32) -> bool {
-        self.ci.status.is_some() && y >= self.r().size().1 - self.context_bar_h(self.active) && x >= self.r().size().0 - self.ci_chip_w()
+        self.ci.status.is_some() && y >= self.r().size().1 - self.bar_row_h() && x >= self.r().size().0 - self.ci_chip_w()
     }
 
     /// Keep the CI chip current: every 15 s while a run is going, else every 60 s while the
@@ -1915,7 +1948,7 @@ impl App {
             self.ci_hover = ci_hover;
             self.mark_dirty();
         }
-        let in_bar = y >= self.r().size().1 - self.context_bar_h(self.active);
+        let in_bar = y >= self.r().size().1 - self.bar_row_h();
         let over_context = self.context.is_some() && in_bar && x < self.r().size().0 - self.ci_chip_w();
         if over_context != self.context_hover {
             self.context_hover = over_context;
@@ -2199,6 +2232,10 @@ impl App {
         for d in &dividers {
             let d = d.rect;
             r.rect(d.x, d.y, d.w, d.h, rgba(theme.tab_active, 1.0));
+        }
+        if let (Some(agents), Some(t)) = (&self.herdr, tabs.get(self.active).filter(|t| t.herdr)) {
+            let h = (ch * 1.5).round();
+            draw_herdr_strip(r, theme, agents, &self.breakdowns, win_h - h * (t.context_bar as u8 + 1) as f32);
         }
         let chip = self.ci.status.as_ref().map(|s| ci_glyph(s.state));
         let chip_w = if chip.is_some() { 3.0 * cw } else { 0.0 };
@@ -2713,6 +2750,52 @@ fn draw_ci_panel(r: &mut Renderer, theme: &Theme, s: &ci::Status, bar_y: f32) ->
     (panel, y0, lh)
 }
 
+/// The context window and the part usable before autocompact, for `tokens` in context.
+fn context_window(tokens: u64, b: Option<&context::Breakdown>) -> (u64, u64) {
+    let window = b.map(|b| b.window).unwrap_or(if tokens > 200_000 { 1_000_000 } else { 200_000 });
+    (window, window.saturating_sub(b.map_or(0, |b| b.buffer())).max(1))
+}
+
+/// Herdr's agents in a row above the context bar: status, name and how full each context is.
+fn draw_herdr_strip(r: &mut Renderer, theme: &Theme, agents: &[herdr::Agent], breakdowns: &HashMap<PathBuf, (Instant, Option<context::Breakdown>)>, y: f32) {
+    let (cw, ch) = r.cell();
+    let win_w = r.size().0;
+    let h = (ch * 1.5).round();
+    let ty = y + ((h - ch) / 2.0).round();
+    let line = r.scale.max(1.0);
+    r.rect(0.0, y, win_w, h, rgba(theme.tab_bar, 0.97));
+    r.rect(0.0, y, win_w, line, rgba(theme.fg, 0.08));
+    let mut x = cw;
+    for a in agents {
+        let (glyph, color) = match a.status.as_str() {
+            "working" => ("●", theme.palette[3]),
+            "idle" => ("○", theme.fg),
+            // Waiting for input, or anything else that wants a look.
+            _ => ("◆", theme.palette[1]),
+        };
+        let label: String = a.label.chars().take(24).collect();
+        let pct = a.used.map(|used| {
+            let (window, usable) = context_window(used, breakdowns.get(&a.cwd).and_then(|b| b.1.as_ref()));
+            let full = used as f32 / usable as f32;
+            let color = if full > 0.85 { theme.palette[1] } else if full > 0.6 { theme.palette[3] } else { theme.fg };
+            (format!(" {:.0}%", used as f32 / window as f32 * 100.0), color)
+        });
+        let w = (2 + label.chars().count() + pct.as_ref().map_or(0, |p| p.0.len())) as f32 * cw;
+        if x + w > win_w {
+            break;
+        }
+        if a.focused {
+            r.rect(x - cw * 0.5, y + line, w + cw, h - line, rgba(theme.fg, 0.08));
+        }
+        r.text(glyph, x, ty, win_w, rgba(color, 1.0));
+        r.text(&label, x + 2.0 * cw, ty, win_w, rgba(theme.fg, if a.focused { 1.0 } else { 0.7 }));
+        if let Some((p, color)) = &pct {
+            r.text(p, x + w - p.len() as f32 * cw, ty, win_w, rgba(*color, 0.9));
+        }
+        x += w + 2.0 * cw;
+    }
+}
+
 /// `inset`: room kept free at the right end (for the CI icon, if any).
 fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)>, b: Option<&context::Breakdown>, hover: bool, inset: f32) {
     let (cw, ch) = r.cell();
@@ -2722,9 +2805,8 @@ fn draw_context_bar(r: &mut Renderer, theme: &Theme, used: Option<&(u64, String)
     let ty = y + ((h - ch) / 2.0).round();
     // Before the first reply the context is just the overhead /context reports.
     let tokens = used.map(|u| u.0).or(b.map(|b| b.overhead())).unwrap_or(0);
-    let window = b.map(|b| b.window).unwrap_or(if tokens > 200_000 { 1_000_000 } else { 200_000 });
+    let (window, usable) = context_window(tokens, b);
     let buffer = b.map_or(0, |b| b.buffer());
-    let usable = window.saturating_sub(buffer).max(1);
     let full = tokens as f32 / usable as f32;
     r.rect(0.0, y, win_w, h, rgba(theme.tab_bar, 0.97));
     r.rect(0.0, y, win_w, r.scale.max(1.0), rgba(theme.fg, 0.08));
@@ -3165,6 +3247,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.ci.status != status {
                     self.ci.status = status;
+                    self.sync_bottom_bar();
+                    self.mark_dirty();
+                }
+            }
+            UserEvent::Herdr(agents) => {
+                self.herdr_waiting = false;
+                if self.herdr != agents {
+                    self.herdr = agents;
                     self.sync_bottom_bar();
                     self.mark_dirty();
                 }

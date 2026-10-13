@@ -56,6 +56,8 @@ pub enum UserEvent {
     ContextBreakdown(std::path::PathBuf, Option<crate::context::Breakdown>),
     /// CI status for a folder's repo (None: not a GitHub/GitLab repo, or the request failed).
     Ci(std::path::PathBuf, Option<crate::ci::Status>),
+    /// Herdr's agents (None: Herdr didn't answer).
+    Herdr(Option<Vec<crate::herdr::Agent>>),
 }
 
 pub struct GridSize {
