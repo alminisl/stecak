@@ -285,3 +285,7 @@ Stećak uses the **`alacritty_terminal` library crate**: the VT/ANSI parser, the
 ## License
 
 [MIT](LICENSE)
+
+---
+
+Assisted development with Claude Code.
