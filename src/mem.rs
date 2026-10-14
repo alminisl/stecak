@@ -1,22 +1,14 @@
 //! claude-mem (github.com/thedotmack/claude-mem) keeps Claude Code's memory across sessions in
 //! a local worker. While that worker answers, the context bar shows how many observations it
-//! holds for the project, and the palette opens its viewer.
+//! holds, and the palette opens its viewer.
 //!
 //! shortcut: shells out to curl (like the CI chip) instead of linking an HTTP client.
 
-use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
 use winit::event_loop::EventLoopProxy;
 
 use crate::pane::UserEvent;
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Stats {
-    /// Observations per project (claude-mem names a project after its folder).
-    pub by_project: HashMap<String, u64>,
-    pub total: u64,
-}
 
 /// The worker's address: the port in its settings, else its per-user default.
 pub fn url() -> String {
@@ -38,15 +30,16 @@ pub fn installed() -> bool {
     dirs::home_dir().is_some_and(|h| h.join(".claude-mem").is_dir())
 }
 
-/// Ask the worker for its counts on a background thread; they (None when it isn't running)
-/// arrive as `UserEvent::Mem`.
+/// Ask the worker for its count on a background thread; it (None when the worker isn't running)
+/// arrives as `UserEvent::Mem`.
 pub fn fetch_async(proxy: EventLoopProxy<UserEvent>) {
     let _ = std::thread::Builder::new().name("claude-mem".into()).stack_size(256 * 1024).spawn(move || {
         let _ = proxy.send_event(UserEvent::Mem(fetch()));
     });
 }
 
-fn fetch() -> Option<Stats> {
+/// How many observations the worker holds (all projects: /api/stats has no per-project counts).
+fn fetch() -> Option<u64> {
     if !installed() {
         return None;
     }
@@ -55,10 +48,8 @@ fn fetch() -> Option<Stats> {
     parse(&out.stdout)
 }
 
-fn parse(json: &[u8]) -> Option<Stats> {
-    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
-    let by_project = v["byProject"].as_object()?.iter().map(|(name, p)| (name.clone(), p["observations"].as_u64().unwrap_or(0))).collect();
-    Some(Stats { by_project, total: v["total"]["observations"].as_u64().unwrap_or(0) })
+fn parse(json: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(json).ok()?["database"]["observations"].as_u64()
 }
 
 #[cfg(test)]
@@ -67,8 +58,9 @@ mod tests {
 
     #[test]
     fn parses_stats() {
-        let s = parse(br#"{"byProject":{"stecak":{"observations":245,"summaries":12},"x":{}},"total":{"observations":401}}"#).unwrap();
-        assert_eq!((s.by_project["stecak"], s.by_project["x"], s.total), (245, 0, 401));
+        // As claude-mem 13.39 answers (its docs describe an older shape).
+        let json = br#"{"worker":{"version":"13.39.0","port":37701},"database":{"path":"/x/claude-mem.db","observations":245,"sessions":3}}"#;
+        assert_eq!(parse(json), Some(245));
         assert!(parse(b"<html>").is_none());
     }
 }

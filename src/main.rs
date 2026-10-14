@@ -271,8 +271,8 @@ struct App {
     /// Herdr's agents while Herdr runs in the active tab, and whether a snapshot is on its way.
     herdr: Option<Vec<herdr::Agent>>,
     herdr_waiting: bool,
-    /// claude-mem's counts while its worker answers, and when they were last asked for.
-    mem: Option<mem::Stats>,
+    /// claude-mem's observation count while its worker answers, and when it was last asked for.
+    mem: Option<u64>,
     mem_checked: Option<Instant>,
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
@@ -805,11 +805,10 @@ impl App {
         self.mark_dirty();
     }
 
-    /// The claude-mem chip left of the CI icon: how many observations it holds for this project.
+    /// The claude-mem chip left of the CI icon: how many observations it holds.
     fn mem_label(&self) -> Option<String> {
-        let (stats, c) = (self.mem.as_ref()?, self.context.as_ref()?);
-        let project = c.cwd.file_name()?.to_string_lossy();
-        Some(format!("◈ {} memories", stats.by_project.get(project.as_ref()).copied().unwrap_or(0)))
+        self.context.as_ref()?;
+        Some(format!("◈ {} memories", self.mem?))
     }
 
     fn mem_chip_w(&self) -> f32 {
@@ -3190,7 +3189,13 @@ impl ApplicationHandler<UserEvent> for App {
         let tab_bar = self.tab_bar_h();
         let w = self.config.window.columns as f32 * cw + 2.0 * pad;
         let h = self.config.window.rows as f32 * ch + 2.0 * pad + tab_bar;
-        let monitor = window.current_monitor();
+        let mut monitor = window.current_monitor();
+        // Scripted test runs open on another monitor, if there is one, away from the one in use.
+        if std::env::var_os("STECAK_DEMO").is_some() {
+            if let Some(other) = event_loop.available_monitors().find(|m| Some(m) != monitor.as_ref()) {
+                monitor = Some(other);
+            }
+        }
         // Never larger than the screen, or the titlebar ends up off-screen.
         let (w, h) = match &monitor {
             Some(m) => (w.min(m.size().width as f32 * 0.9), h.min(m.size().height as f32 * 0.85)),

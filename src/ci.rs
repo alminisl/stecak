@@ -69,9 +69,36 @@ fn fetch(cwd: &Path, gitlab_hosts: &[String]) -> Option<Status> {
             github_status(&get(&url, token("github.com", &host)?.as_deref())?)
         }
         Host::GitLab(h) => {
-            let url = format!("https://{h}/api/v4/projects/{}/pipelines?per_page=1&ref={}", encode(&path), encode(&branch));
-            gitlab_status(&get(&url, token("gitlab", &h)?.as_deref())?)
+            // By commit first: merge request pipelines run on refs/merge-requests/<iid>/head,
+            // so filtering by branch alone never finds them.
+            let project = format!("projects/{}/pipelines?per_page=1", encode(&path));
+            let by_sha = git(&["rev-parse", "HEAD"]).and_then(|sha| gitlab_get(&h, &format!("{project}&sha={sha}")));
+            let v = match by_sha.filter(|v| v.as_array().is_some_and(|a| !a.is_empty())) {
+                Some(v) => v,
+                None => gitlab_get(&h, &format!("{project}&ref={}", encode(&branch)))?,
+            };
+            gitlab_status(&v)
         }
+    }
+}
+
+/// A GitLab API call. Through `glab api` when it's installed: it reads its token from the OS
+/// keyring, where recent glab versions keep it (`glab config get token` returns nothing then).
+/// Otherwise curl, with GITLAB_TOKEN if set.
+fn gitlab_get(host: &str, endpoint: &str) -> Option<serde_json::Value> {
+    let mut cmd = Command::new("glab");
+    if let Some(path) = crate::ai::user_path().filter(|_| cfg!(unix)) {
+        cmd.env("PATH", path);
+    }
+    let out = crate::ai::no_console(cmd.args(["api", "--hostname", host, endpoint])).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    match out {
+        Ok(out) if out.status.success() => serde_json::from_slice(&out.stdout).ok(),
+        Ok(_) => {
+            log::warn!("ci: glab api failed: {host} {endpoint}");
+            None
+        }
+        // No glab: plain HTTPS.
+        Err(_) => get(&format!("https://{host}/api/v4/{endpoint}"), token("gitlab", host)?.as_deref()),
     }
 }
 
@@ -101,8 +128,9 @@ fn encode(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// A token from the environment or the provider's CLI (`gh` / `glab`), looked up once per
-/// host. Outer None = never (unreachable); inner None = no token, try unauthenticated.
+/// A token from the environment, or for GitHub from `gh`, looked up once per host. (GitLab
+/// without GITLAB_TOKEN goes through `glab api` instead, see `gitlab_get`.) Outer None = never
+/// (unreachable); inner None = no token, try unauthenticated.
 fn token(kind: &str, host: &str) -> Option<Option<String>> {
     static CACHE: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
     let mut cache = CACHE.lock().ok()?;
@@ -110,14 +138,12 @@ fn token(kind: &str, host: &str) -> Option<Option<String>> {
         return Some(t.clone());
     }
     let found = {
-        let (vars, cli): (&[&str], Vec<&str>) = if kind == "github.com" {
-            (&["GH_TOKEN", "GITHUB_TOKEN"], vec!["gh", "auth", "token"])
-        } else {
-            (&["GITLAB_TOKEN"], vec!["glab", "config", "get", "token", "--host", host])
-        };
+        let (vars, cli): (&[&str], Option<[&str; 3]>) =
+            if kind == "github.com" { (&["GH_TOKEN", "GITHUB_TOKEN"], Some(["gh", "auth", "token"])) } else { (&["GITLAB_TOKEN"], None) };
         vars.iter().find_map(|v| std::env::var(v).ok().filter(|t| !t.is_empty())).or_else(|| {
+            let cli = cli?;
             let mut cmd = Command::new(cli[0]);
-            // Started from the Dock, macOS apps get a bare PATH without Homebrew's gh / glab.
+            // Started from the Dock, macOS apps get a bare PATH without Homebrew's gh.
             if let Some(path) = crate::ai::user_path().filter(|_| cfg!(unix)) {
                 cmd.env("PATH", path);
             }
