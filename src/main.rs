@@ -14,6 +14,7 @@ mod agents;
 mod ai;
 mod bgimage;
 mod ci;
+mod crash;
 mod browser;
 mod config;
 mod context;
@@ -21,6 +22,7 @@ mod draw;
 mod herdr;
 mod input;
 mod layout;
+mod mem;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 // shortcut: no popup menus on Linux (muda needs GTK there); add them if Linux users ask.
@@ -42,6 +44,7 @@ mod renderer;
 mod restore;
 mod search;
 mod settings;
+mod setup;
 mod shell;
 mod sixel;
 mod text;
@@ -85,6 +88,10 @@ enum UpdateUi {
     Installing(String),
     Ready(PathBuf),
     Failed(String, String),
+    /// The last run crashed: offer to report it.
+    Crashed(crash::Report),
+    /// First launch: offer to install these agent tools.
+    Setup(Vec<&'static str>),
 }
 
 struct Tab {
@@ -264,6 +271,9 @@ struct App {
     /// Herdr's agents while Herdr runs in the active tab, and whether a snapshot is on its way.
     herdr: Option<Vec<herdr::Agent>>,
     herdr_waiting: bool,
+    /// claude-mem's counts while its worker answers, and when they were last asked for.
+    mem: Option<mem::Stats>,
+    mem_checked: Option<Instant>,
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
     claude_busy: HashMap<PaneId, (Instant, Option<bool>)>,
@@ -363,6 +373,8 @@ impl App {
             ci: CiState::default(),
             herdr: None,
             herdr_waiting: false,
+            mem: None,
+            mem_checked: None,
             breakdowns: HashMap::new(),
             claude_busy: HashMap::new(),
             agent_names: HashMap::new(),
@@ -755,6 +767,10 @@ impl App {
                     c.used = c.transcript.as_deref().and_then(context::last_usage);
                     self.dirty = true;
                 }
+                if self.mem_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+                    self.mem_checked = Some(Instant::now());
+                    mem::fetch_async(self.proxy.clone());
+                }
                 // The breakdown barely changes within a session: refresh it every 10 minutes.
                 if self.breakdowns.get(&cwd).is_none_or(|b| b.0.elapsed() > Duration::from_secs(600)) {
                     let old = self.breakdowns.remove(&cwd).and_then(|b| b.1);
@@ -775,6 +791,34 @@ impl App {
             t.herdr = strip;
             self.resize_all();
         }
+    }
+
+    /// Type the installers for `tools` into a new tab's shell.
+    fn install_tools(&mut self, tools: &[&str]) {
+        if tools.is_empty() {
+            return;
+        }
+        self.new_tab();
+        if let Some(p) = self.focused_pane() {
+            p.write(setup::install_line(tools).as_bytes());
+        }
+        self.mark_dirty();
+    }
+
+    /// The claude-mem chip left of the CI icon: how many observations it holds for this project.
+    fn mem_label(&self) -> Option<String> {
+        let (stats, c) = (self.mem.as_ref()?, self.context.as_ref()?);
+        let project = c.cwd.file_name()?.to_string_lossy();
+        Some(format!("◈ {} memories", stats.by_project.get(project.as_ref()).copied().unwrap_or(0)))
+    }
+
+    fn mem_chip_w(&self) -> f32 {
+        self.mem_label().map_or(0.0, |l| (l.chars().count() + 2) as f32 * self.r().cell().0)
+    }
+
+    fn over_mem_chip(&self, x: f32, y: f32) -> bool {
+        let right = self.r().size().0 - self.ci_chip_w();
+        y >= self.r().size().1 - self.bar_row_h() && x < right && x >= right - self.mem_chip_w()
     }
 
     /// Width of the CI icon at the right end of the bottom bar (0 without one).
@@ -1252,6 +1296,8 @@ impl App {
         let action = match id {
             "check-updates" => return update::check_async(self.proxy.clone(), true),
             "open-config" => return self.open_config_file(),
+            "mem-viewer" => return mouse::open_url(&mem::url()),
+            "setup-tools" => return self.install_tools(&setup::missing()),
             "website" => return mouse::open_url("https://alminisl.github.io/stecak/"),
             "issue" => return mouse::open_url("https://github.com/alminisl/stecak/issues/new"),
             "settings" => Action::OpenSettings,
@@ -1350,6 +1396,20 @@ impl App {
             }
             (UpdateUi::Failed(_, page), true) => {
                 mouse::open_url(&page);
+                None
+            }
+            (UpdateUi::Setup(tools), primary) => {
+                setup::mark_offered(self.config_dir());
+                if primary {
+                    self.install_tools(&tools);
+                }
+                None
+            }
+            (UpdateUi::Crashed(report), primary) => {
+                if primary {
+                    crash::report(&report);
+                }
+                crash::mark_handled(self.config_dir(), &report);
                 None
             }
             // Installing keeps going in the background; its result reopens the popup.
@@ -1784,6 +1844,10 @@ impl App {
             mouse::open_url(&s.url);
             return;
         }
+        if self.over_mem_chip(x, y) {
+            mouse::open_url(&mem::url());
+            return;
+        }
         if self.sessions.open {
             match self.sessions_layout {
                 Some((panel, y0, lh, first)) if panel.contains(x, y) => {
@@ -2140,6 +2204,7 @@ impl App {
         }
 
         let cursor_on = self.cursor_on();
+        let (mem, mem_w) = (self.mem_label(), self.mem_chip_w());
         let App { renderer, panes, caches, theme, search, tabs, config, .. } = self;
         let r = renderer.as_mut().unwrap();
         let (cw, ch) = r.cell();
@@ -2241,7 +2306,11 @@ impl App {
         let chip_w = if chip.is_some() { 3.0 * cw } else { 0.0 };
         if let Some(c) = &self.context {
             let breakdown = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
-            draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover, chip_w);
+            draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover, chip_w + mem_w);
+            if let Some(label) = mem {
+                let h = (ch * 1.5).round();
+                r.text(&label, win_w - chip_w - mem_w + cw, win_h - h + ((h - ch) / 2.0).round(), win_w - chip_w, rgba(theme.fg, 0.7));
+            }
         } else if chip.is_some() {
             let h = (ch * 1.5).round();
             r.rect(0.0, win_h - h, win_w, h, rgba(theme.tab_bar, 0.97));
@@ -2341,6 +2410,8 @@ impl App {
                 // Windows installs on Restart (a running exe can't be replaced); macOS already has.
                 UpdateUi::Ready(_) => draw_update(r, theme, if cfg!(windows) { "Update ready" } else { "Update installed" }, "Restart Stećak to use the new version", Some("Restart"), "Later"),
                 UpdateUi::Failed(e, _) => draw_update(r, theme, "Update failed", e, Some("Download page"), "Close"),
+                UpdateUi::Setup(tools) => draw_update(r, theme, "Set up agent tools?", &format!("Stećak works with {}; install in a new tab", tools.join(" and ")), Some("Install"), "Not now"),
+                UpdateUi::Crashed(report) => draw_update(r, theme, "Stećak crashed last time", &report.summary, Some("Report on GitHub"), "Dismiss"),
             }
         });
         self.paste_buttons = self.paste_confirm.as_deref().and_then(|text| {
@@ -3153,6 +3224,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         self.load_background();
+        // A newer-version popup replaces this one; the crash is offered again next launch.
+        if std::env::var_os("STECAK_DEMO").is_none() {
+            self.update = crash::pending(self.config_dir()).map(UpdateUi::Crashed).or_else(|| setup::offer(self.config_dir()).map(UpdateUi::Setup));
+        }
         if self.config.check_for_updates && std::env::var_os("STECAK_DEMO").is_none() {
             update::check_async(self.proxy.clone(), false);
         }
@@ -3256,6 +3331,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.herdr != agents {
                     self.herdr = agents;
                     self.sync_bottom_bar();
+                    self.mark_dirty();
+                }
+            }
+            UserEvent::Mem(stats) => {
+                if self.mem != stats {
+                    self.mem = stats;
                     self.mark_dirty();
                 }
             }
@@ -3516,6 +3597,8 @@ fn init_logging(config_path: &std::path::Path) {
 {}", std::backtrace::Backtrace::force_capture());
         default_hook(info);
     }));
+    // Runs first, then the logging hook above.
+    crash::install_hook(config_path.parent().unwrap_or(std::path::Path::new(".")));
 }
 
 fn main() {

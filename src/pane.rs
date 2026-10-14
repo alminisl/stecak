@@ -58,6 +58,8 @@ pub enum UserEvent {
     Ci(std::path::PathBuf, Option<crate::ci::Status>),
     /// Herdr's agents (None: Herdr didn't answer).
     Herdr(Option<Vec<crate::herdr::Agent>>),
+    /// claude-mem's counts (None: its worker isn't running).
+    Mem(Option<crate::mem::Stats>),
 }
 
 pub struct GridSize {

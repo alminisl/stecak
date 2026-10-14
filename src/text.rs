@@ -151,6 +151,17 @@ fn find_face(db: &fontdb::Database, families: &[String], weight: fontdb::Weight,
     })
 }
 
+/// Whether a face has the metrics a cell grid needs. Bitmap-only faces (e.g. macOS's
+/// "GB18030 Bitmap") report zero size, which would make the grid infinitely wide.
+fn has_cell_metrics(src: &FontSource) -> bool {
+    Face::open(src).is_some_and(|f| {
+        let font = f.font();
+        // hhea.numberOfHMetrics; swash underflows asking for an advance when it's 0.
+        let h_metrics = font.table(swash::tag_from_bytes(b"hhea")).and_then(|t| t.get(34..36)).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
+        font.metrics(&[]).units_per_em > 0 && h_metrics > 0 && font.glyph_metrics(&[]).advance_width(font.charmap().map('M')) > 0.0
+    })
+}
+
 /// Free function so callers can borrow `faces` and the shaping contexts disjointly.
 fn face_in(faces: &[Option<Face>], i: u16) -> &Face {
     faces[i as usize].as_ref().or(faces[0].as_ref()).expect("primary face is always loaded")
@@ -164,7 +175,15 @@ impl Text {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
 
-        let fam = &cfg.font.family;
+        // Skip families that can't size a cell, so the next one (or the system monospace) is used.
+        let fam: Vec<String> = cfg
+            .font
+            .family
+            .iter()
+            .filter(|n| find_in_family(&db, n, Weight::NORMAL, Style::Normal).is_some_and(|s| has_cell_metrics(&s)))
+            .cloned()
+            .collect();
+        let fam = &fam;
         let regular_src = find_face(&db, fam, Weight::NORMAL, Style::Normal).expect("no monospace font found on this system");
         let regular = Face::open(&regular_src).expect("failed to open primary font");
         let open_or_regular = |src: Option<FontSource>| src.and_then(|s| Face::open(&s)).or_else(|| Face::open(&regular_src));
@@ -460,5 +479,15 @@ mod tests {
             assert_eq!(cols, expected, "{word}: every character needs its own cell");
         }
     }
+
+    /// A bitmap-only font (no usable metrics) must not produce a zero-size cell.
+    #[test]
+    fn unusable_font_falls_back() {
+        let mut cfg = Config::default();
+        cfg.font.family.insert(0, "GB18030 Bitmap".into());
+        let t = Text::load(&cfg, 2.0);
+        assert!(t.cell_w >= 1.0 && t.cell_h >= 1.0, "cell {}x{}", t.cell_w, t.cell_h);
+    }
 }
+
 

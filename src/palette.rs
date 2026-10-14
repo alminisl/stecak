@@ -60,6 +60,8 @@ const ACTIONS: &[(&str, &str, &str, &str)] = &[
     ("Open config file", "", "", "open-config"),
     ("Keyboard shortcuts", "⌘/", "Ctrl+Shift+/", "shortcuts"),
     ("Check for updates", "", "", "check-updates"),
+    ("Memory: open claude-mem viewer", "", "", "mem-viewer"),
+    ("Set up agent tools (claude-mem, Herdr)", "", "", "setup-tools"),
 ];
 
 impl Palette {
