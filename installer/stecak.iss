@@ -114,6 +114,19 @@ begin
   RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Paths);
 end;
 
+{ Each shell tab runs OpenConsole.exe from the install folder. It has no window, so CloseApplications can't
+  close it, and a copy that's still running blocks the file copy (silent updates then roll back).
+  Give each one 5 s to exit after Stećak does, then stop it. Herdr's OpenConsole lives elsewhere. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Result := '';
+  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "Get-Process OpenConsole -EA 0 | ? Path -eq ''' +
+    ExpandConstant('{app}') + '\OpenConsole.exe'' | % { if (!$_.WaitForExit(5000)) { $_.Kill() } }"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
