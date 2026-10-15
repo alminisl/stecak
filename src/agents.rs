@@ -311,7 +311,8 @@ pub fn foreground(shell_pid: u32) -> Option<(u32, String)> {
     let mut level: Vec<&WinProcess> = children(shell_pid).collect();
     let mut deepest = None;
     while !level.is_empty() {
-        if let Some(agent) = level.iter().find(|p| is_agent(&p.name)) {
+        // Herdr counts too: its own children (an ssh bridge for remote workspaces) aren't what runs here.
+        if let Some(agent) = level.iter().find(|p| is_agent(&p.name) || p.name.contains("herdr")) {
             return Some((agent.pid, agent.name.clone()));
         }
         deepest = level.last().map(|p| (p.pid, p.name.clone()));
