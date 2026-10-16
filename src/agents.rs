@@ -110,7 +110,7 @@ pub fn list_sessions(limit: usize) -> Vec<Session> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
     let mut files: Vec<(SystemTime, PathBuf, Tool)> = Vec::new();
     // Claude Code: ~/.claude/projects/<encoded cwd>/<session id>.jsonl
-    for dir in read_dirs(&home.join(".claude/projects")) {
+    for dir in claude_dirs().iter().flat_map(|c| read_dirs(&c.join("projects"))) {
         collect_jsonl(&dir, Tool::Claude, &mut files);
     }
     // Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl
@@ -321,6 +321,38 @@ pub fn foreground(shell_pid: u32) -> Option<(u32, String)> {
     deepest.or_else(|| procs.iter().find(|p| p.pid == shell_pid).map(|p| (p.pid, p.name.clone())))
 }
 
+/// Claude Code's config folders: `~/.claude`, plus any set aside with `CLAUDE_CONFIG_DIR`
+/// (e.g. `~/.claude-personal`). That variable lives in the shell running Claude, not in
+/// stecak, so every `~/.claude*` folder with Claude's layout counts.
+pub fn claude_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).into_iter().collect();
+    if let Some(home) = dirs::home_dir() {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&home)
+            .map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".claude")).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        found.retain(|d| d.join("projects").is_dir() || d.join("sessions").is_dir());
+        found.sort();
+        for d in found {
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        }
+    }
+    dirs
+}
+
+/// `<config>/sessions/<pid>.json` of a running Claude Code, from whichever config folder it
+/// uses. A pid can be left over in another folder from a process long gone: newest wins.
+fn session_file(pid: i32) -> Option<serde_json::Value> {
+    let path = claude_dirs()
+        .into_iter()
+        .map(|d| d.join("sessions").join(format!("{pid}.json")))
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .max()?
+        .1;
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
 /// The session a running Claude Code process is in: Claude Code keeps
 /// `~/.claude/sessions/<pid>.json` with its current `sessionId` (updated on /clear, /resume).
 pub fn claude_session_id(pid: i32) -> Option<String> {
@@ -330,15 +362,13 @@ pub fn claude_session_id(pid: i32) -> Option<String> {
 /// Whether a running Claude Code process is busy (working on a turn), from the `status` it
 /// keeps in `~/.claude/sessions/<pid>.json`. None if it doesn't say.
 pub fn claude_busy(pid: i32) -> Option<bool> {
-    let path = dirs::home_dir()?.join(".claude/sessions").join(format!("{pid}.json"));
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let v = session_file(pid)?;
     v["status"].as_str().map(|s| s == "busy")
 }
 
 /// The running Claude Code process's session id and folder.
 pub fn claude_session(pid: i32) -> Option<(String, PathBuf)> {
-    let path = dirs::home_dir()?.join(".claude/sessions").join(format!("{pid}.json"));
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let v = session_file(pid)?;
     let id = v["sessionId"].as_str()?;
     // It becomes a shell argument: accept only what session ids look like.
     let ok = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');

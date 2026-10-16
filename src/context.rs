@@ -105,10 +105,22 @@ pub fn short(n: u64) -> String {
     }
 }
 
-/// `~/.claude/projects/<folder>/<session id>.jsonl`.
+/// `<config>/projects/<folder>/<session id>.jsonl`, in any of Claude Code's config folders.
 pub fn transcript_path(session_id: &str) -> Option<PathBuf> {
     let file = format!("{session_id}.jsonl");
-    std::fs::read_dir(dirs::home_dir()?.join(".claude/projects")).ok()?.flatten().map(|e| e.path().join(&file)).find(|p| p.is_file())
+    crate::agents::claude_dirs()
+        .iter()
+        .filter_map(|c| std::fs::read_dir(c.join("projects")).ok())
+        .flat_map(|rd| rd.flatten())
+        .map(|e| e.path().join(&file))
+        .find(|p| p.is_file())
+}
+
+/// The config folder a transcript belongs to, for `CLAUDE_CONFIG_DIR`. None for the default
+/// `~/.claude`: setting it explicitly would make Claude Code look for `~/.claude/.claude.json`.
+pub fn config_dir_of(transcript: &Path) -> Option<PathBuf> {
+    let dir = transcript.parent()?.parent()?.parent()?;
+    (Some(dir) != dirs::home_dir().map(|h| h.join(".claude")).as_deref()).then(|| dir.to_path_buf())
 }
 
 /// Tokens in context as of the last main-thread assistant turn (prompt + cached + output),
@@ -135,13 +147,16 @@ pub fn last_usage(path: &Path) -> Option<(u64, String)> {
 
 /// Run `/context` in `cwd` through the login shell (so PATH finds `claude`), without saving a
 /// session or running the user's hooks. The result arrives as `UserEvent::ContextBreakdown`.
-pub fn fetch_async(cwd: PathBuf, proxy: EventLoopProxy<UserEvent>) {
+pub fn fetch_async(cwd: PathBuf, config_dir: Option<PathBuf>, proxy: EventLoopProxy<UserEvent>) {
     let _ = std::thread::Builder::new().name("context".into()).spawn(move || {
         let script = r#"claude -p --no-session-persistence --settings '{"disableAllHooks":true}' --output-format json /context"#;
         let Some(mut cmd) = crate::shell::background(script, None) else { return };
         cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if cwd.is_dir() {
             cmd.current_dir(&cwd);
+        }
+        if let Some(dir) = &config_dir {
+            cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
         let breakdown = cmd.output().ok().filter(|o| o.status.success()).and_then(|o| {
             let v: serde_json::Value = serde_json::from_slice(&o.stdout).ok()?;
@@ -174,6 +189,14 @@ mod tests {
         assert!(rows.contains(&(MESSAGES.into(), 100_000 - b.overhead())));
         assert!(rows.contains(&(FREE.into(), 1_000_000 - 100_000 - 33_000)));
         assert!(Breakdown::parse("no table").is_none());
+    }
+
+    #[test]
+    fn config_dir_only_when_not_default() {
+        let home = dirs::home_dir().unwrap();
+        let t = |c: &str| home.join(c).join("projects/-Users-x/abc.jsonl");
+        assert_eq!(config_dir_of(&t(".claude-personal")), Some(home.join(".claude-personal")));
+        assert_eq!(config_dir_of(&t(".claude")), None);
     }
 
     #[test]

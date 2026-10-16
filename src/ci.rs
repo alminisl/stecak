@@ -124,7 +124,7 @@ fn provider(host: &str, gitlab_hosts: &[String]) -> Option<Host> {
 }
 
 /// Percent-encode everything but unreserved characters (for paths and query values).
-fn encode(s: &str) -> String {
+pub fn encode(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 

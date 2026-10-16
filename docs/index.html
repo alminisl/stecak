@@ -208,6 +208,8 @@
           <li>Tabs, splits and folders come back at launch</li>
           <li>Checks for updates and updates in place</li>
           <li>Native on Windows: installer, acrylic blur, PowerShell</li>
+          <li>CI status for GitHub Actions and GitLab pipelines</li>
+          <li>Sixel images, shell profiles, screen readers</li>
           <li>Built for Claude Code and Codex</li>
         </ul>
       </div>
@@ -241,12 +243,34 @@
           <p>Close the window and nothing is lost: at the next launch every tab and split reopens in its folder, with the exact Claude Code conversation that was running there.</p>
         </div>
       </div>
+      <div class="two" style="margin-top:56px">
+        <div>
+          <h3>See what's in the context</h3>
+          <p>While Claude Code runs, a bar under the panes fills as its context window does, colored by what's in it: system prompt, tools, MCP servers, skills and your messages, with the auto-compact point marked. Hover it for the full breakdown, straight from Claude Code's own <span class="mono">/context</span>. No API calls.</p>
+          <p class="note">It finds sessions in any Claude config folder, so a separate <span class="mono">CLAUDE_CONFIG_DIR</span> for work and personal accounts just works.</p>
+        </div>
+        <img class="shot" src="img/context-breakdown.png" alt="The context bar under Claude Code, hovered: a breakdown of system prompt, tools, MCP, skills, messages, free space and the autocompact buffer" loading="lazy">
+      </div>
+      <div class="two" style="margin-top:56px">
+        <img class="shot" src="img/memories.png" alt="Hovering the memory chip lists the project's newest claude-mem memories: bugfix, discovery and change entries with titles, ages and summaries" loading="lazy">
+        <div>
+          <h3>Memories at a glance</h3>
+          <p>With <a href="https://github.com/thedotmack/claude-mem">claude-mem</a> running, the bar shows how many memories your agent has built up. Hover it to read the project's newest ones (bugfixes, discoveries, changes, decisions), each with its age and a one-line summary. Click to open claude-mem's viewer.</p>
+          <p>Running several agents in <a href="https://herdr.dev">Herdr</a>? A strip above the bar shows each one's status and how full its context is. The first launch offers to install both for you.</p>
+        </div>
+      </div>
+      <div class="two" style="margin-top:56px">
+        <div>
+          <h3>CI where you work</h3>
+          <p>In a GitHub or GitLab repo, the bar's right end shows the latest commit's CI: running, passed or failed. Hover it for every workflow, click one to open it, and get a notification when a run finishes while you're elsewhere. It uses the <span class="mono">gh</span> or <span class="mono">glab</span> login you already have.</p>
+        </div>
+        <img class="shot" src="img/ci.png" alt="The CI panel above the bottom bar: pages build and deployment passed, CI passed" loading="lazy">
+      </div>
       <h3 style="margin-top:56px">Your agent, one keystroke away</h3>
       <ul class="features">
         <li><b>Ask for a command (⌘I).</b> Describe it in words; the command is typed at your prompt for you to check. It's never run for you.</li>
         <li><b>Explain the last error (⌘⇧E).</b> The command, its exit code and its output go to your agent, which explains what went wrong.</li>
         <li><b>Send a selection (⌘⇧L).</b> Paste selected text, or the last command and its output, into the agent as context.</li>
-        <li><b>Context bar.</b> A bar under Claude Code fills as its context window does, colored by what's in it, with the auto-compact point marked.</li>
         <li><b>Paste images.</b> ⌘V with a screenshot on the clipboard sends it straight to Claude Code or Codex.</li>
         <li><b>No API keys.</b> Everything runs through the <span class="mono">claude</span> or <span class="mono">codex</span> you already have.</li>
       </ul>

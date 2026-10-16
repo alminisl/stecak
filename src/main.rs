@@ -272,7 +272,11 @@ struct App {
     herdr: Option<Vec<herdr::Agent>>,
     herdr_waiting: bool,
     /// claude-mem's observation count while its worker answers, and when it was last asked for.
-    mem: Option<u64>,
+    mem: Option<mem::Stats>,
+    /// The project the memory chip last asked claude-mem about.
+    mem_project: Option<String>,
+    mem_hover: bool,
+    mem_panel: Option<Rect>,
     mem_checked: Option<Instant>,
     breakdowns: HashMap<PathBuf, (Instant, Option<context::Breakdown>)>,
     /// Claude Code's own busy/idle state per pane, re-read at most twice a second.
@@ -375,6 +379,9 @@ impl App {
             herdr_waiting: false,
             mem: None,
             mem_checked: None,
+            mem_project: None,
+            mem_hover: false,
+            mem_panel: None,
             breakdowns: HashMap::new(),
             claude_busy: HashMap::new(),
             agent_names: HashMap::new(),
@@ -767,15 +774,18 @@ impl App {
                     c.used = c.transcript.as_deref().and_then(context::last_usage);
                     self.dirty = true;
                 }
-                if self.mem_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+                let project = cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+                if self.mem_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) || project != self.mem_project {
                     self.mem_checked = Some(Instant::now());
-                    mem::fetch_async(self.proxy.clone());
+                    self.mem_project = project.clone();
+                    mem::fetch_async(project, self.proxy.clone());
                 }
                 // The breakdown barely changes within a session: refresh it every 10 minutes.
                 if self.breakdowns.get(&cwd).is_none_or(|b| b.0.elapsed() > Duration::from_secs(600)) {
                     let old = self.breakdowns.remove(&cwd).and_then(|b| b.1);
                     self.breakdowns.insert(cwd.clone(), (Instant::now(), old));
-                    context::fetch_async(cwd, self.proxy.clone());
+                    let config_dir = c.transcript.as_deref().and_then(context::config_dir_of);
+                    context::fetch_async(cwd, config_dir, self.proxy.clone());
                 }
             }
         }
@@ -808,7 +818,7 @@ impl App {
     /// The claude-mem chip left of the CI icon: how many observations it holds.
     fn mem_label(&self) -> Option<String> {
         self.context.as_ref()?;
-        Some(format!("◈ {} memories", self.mem?))
+        Some(format!("◈ {} memories", self.mem.as_ref()?.total))
     }
 
     fn mem_chip_w(&self) -> f32 {
@@ -1697,6 +1707,23 @@ impl App {
                 }
             }
             "send" => self.send_selection(),
+            // Point the mouse at a bottom-bar item, to see its hover panel.
+            "hover" => {
+                let (w, h) = self.r().size();
+                let y = h - self.bar_row_h() / 2.0;
+                self.mouse = match arg {
+                    "mem" => (w - self.ci_chip_w() - self.mem_chip_w() / 2.0, y),
+                    "ci" => (w - self.ci_chip_w() / 2.0, y),
+                    _ => (w / 3.0, y),
+                };
+                self.on_motion();
+            }
+            "snapshot" => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.snapshot = Some(arg.into());
+                }
+                self.mark_dirty();
+            }
             "check-update" => update::check_async(self.proxy.clone(), true),
             "update-go" => self.update_action(true, event_loop),
             "update" => self.update = Some(UpdateUi::Available(update::Release { version: arg.to_string(), page: String::new(), installer: None })),
@@ -1843,7 +1870,7 @@ impl App {
             mouse::open_url(&s.url);
             return;
         }
-        if self.over_mem_chip(x, y) {
+        if self.over_mem_chip(x, y) || (self.mem_hover && self.mem_panel.is_some_and(|p| p.contains(x, y))) {
             mouse::open_url(&mem::url());
             return;
         }
@@ -2011,8 +2038,13 @@ impl App {
             self.ci_hover = ci_hover;
             self.mark_dirty();
         }
+        let mem_hover = self.over_mem_chip(x, y) || (self.mem_hover && self.mem_panel.is_some_and(|p| p.contains(x, y)));
+        if mem_hover != self.mem_hover {
+            self.mem_hover = mem_hover;
+            self.mark_dirty();
+        }
         let in_bar = y >= self.r().size().1 - self.bar_row_h();
-        let over_context = self.context.is_some() && in_bar && x < self.r().size().0 - self.ci_chip_w();
+        let over_context = self.context.is_some() && in_bar && x < self.r().size().0 - self.ci_chip_w() - self.mem_chip_w();
         if over_context != self.context_hover {
             self.context_hover = over_context;
             self.mark_dirty();
@@ -2306,9 +2338,17 @@ impl App {
         if let Some(c) = &self.context {
             let breakdown = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
             draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover, chip_w + mem_w);
+            self.mem_panel = None;
             if let Some(label) = mem {
                 let h = (ch * 1.5).round();
+                if self.mem_hover {
+                    r.rect(win_w - chip_w - mem_w, win_h - h, mem_w, h, rgba(theme.fg, 0.08));
+                }
                 r.text(&label, win_w - chip_w - mem_w + cw, win_h - h + ((h - ch) / 2.0).round(), win_w - chip_w, rgba(theme.fg, 0.7));
+                if let (true, Some(stats)) = (self.mem_hover, self.mem.as_ref()) {
+                    let project = self.mem_project.as_deref().unwrap_or_default();
+                    self.mem_panel = Some(draw_mem_panel(r, theme, project, stats, win_w - chip_w, win_h - h));
+                }
             }
         } else if chip.is_some() {
             let h = (ch * 1.5).round();
@@ -2799,7 +2839,7 @@ fn draw_ci_panel(r: &mut Renderer, theme: &Theme, s: &ci::Status, bar_y: f32) ->
     };
     let longest = s.runs.iter().map(|r| r.name.chars().count()).max().unwrap_or(0);
     let w = ((longest + 18) as f32 * cw).clamp(30.0 * cw, (win_w - 2.0 * cw).max(cw));
-    let ph = lh * (s.runs.len() as f32 + 2.5);
+    let ph = lh * (s.runs.len() as f32 + 3.0);
     let panel = Rect { x: win_w - w - cw, y: bar_y - ph, w: w + cw, h: ph };
     let (px0, pad) = (panel.x, 2.0 * cw);
     let (_, accent) = ci_glyph(s.state);
@@ -2818,6 +2858,53 @@ fn draw_ci_panel(r: &mut Renderer, theme: &Theme, s: &ci::Status, bar_y: f32) ->
     }
     r.text("click a run to open it", px0 + pad, panel.y + ph - lh + dy - lh * 0.2, px0 + w - pad, rgba(theme.fg, 0.4));
     (panel, y0, lh)
+}
+
+/// The project's latest claude-mem observations, above the memory chip: each one's type,
+/// title, age and subtitle.
+fn draw_mem_panel(r: &mut Renderer, theme: &Theme, project: &str, stats: &mem::Stats, right: f32, bar_y: f32) -> Rect {
+    let (cw, ch) = r.cell();
+    let lh = (ch * 1.35).round();
+    let dy = ((lh - ch) / 2.0).round();
+    let w = (72.0 * cw).min(right - cw).max(cw);
+    // Two lines per memory, as many as fit above the bar with room for the tab bar.
+    let fit = (((bar_y / lh) - 6.0) / 2.0).max(1.0) as usize;
+    let recent = &stats.recent[..stats.recent.len().min(fit)];
+    let rows = if recent.is_empty() { 1.0 } else { recent.len() as f32 * 2.0 };
+    let ph = lh * (rows + 3.0);
+    let panel = Rect { x: right - w, y: bar_y - ph, w, h: ph };
+    let (x0, pad) = (panel.x, 2.0 * cw);
+    let kind_color = |kind: &str| match kind {
+        "bugfix" => theme.palette[1],
+        "feature" => theme.palette[2],
+        "discovery" => theme.palette[3],
+        "change" => theme.palette[4],
+        "refactor" => theme.palette[5],
+        "decision" => theme.palette[6],
+        _ => theme.fg,
+    };
+    r.rect(x0, panel.y, w, ph, rgba(theme.tab_bar, 0.98));
+    r.rect(x0, panel.y, w, r.scale.max(1.0), rgba(theme.palette[5], 1.0));
+    let title = if project.is_empty() { "Memories".to_string() } else { format!("Memories · {project}") };
+    r.text(&title, x0 + pad, panel.y + lh * 0.3 + dy, x0 + w - pad, rgba(theme.fg, 1.0));
+    let y0 = panel.y + lh * 1.5;
+    if recent.is_empty() {
+        r.text("none for this project yet", x0 + pad, y0 + dy, x0 + w - pad, rgba(theme.fg, 0.5));
+    }
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let kind_w = 11.0 * cw;
+    for (i, m) in recent.iter().enumerate() {
+        let ry = y0 + i as f32 * 2.0 * lh + dy;
+        let age = mem::age(m.created_ms, now_ms);
+        let ax = x0 + w - pad - age.chars().count() as f32 * cw;
+        r.text(&m.kind, x0 + pad, ry, x0 + pad + kind_w - cw, rgba(kind_color(&m.kind), 0.95));
+        r.text(&m.title, x0 + pad + kind_w, ry, ax - cw, rgba(theme.fg, 0.92));
+        r.text(&age, ax, ry, x0 + w, rgba(theme.fg, 0.45));
+        r.text(&m.subtitle, x0 + pad + kind_w, ry + lh, x0 + w - pad, rgba(theme.fg, 0.5));
+    }
+    let footer = if stats.more || recent.len() < stats.recent.len() { "newest first · click to open claude-mem for all" } else { "click to open claude-mem" };
+    r.text(footer, x0 + pad, panel.y + ph - lh + dy - lh * 0.2, x0 + w - pad, rgba(theme.fg, 0.4));
+    panel
 }
 
 /// The context window and the part usable before autocompact, for `tokens` in context.

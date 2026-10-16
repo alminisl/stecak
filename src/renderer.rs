@@ -132,6 +132,8 @@ pub struct Renderer {
     pub scale: f32,
     pub transparent: bool,
     premultiplied: bool,
+    /// Save the next presented frame here as a PNG (STECAK_DEMO `snapshot:` step).
+    pub snapshot: Option<std::path::PathBuf>,
 }
 
 impl Renderer {
@@ -198,7 +200,12 @@ impl Renderer {
 
         let size = window.inner_size();
         let surface_cfg = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Scripted runs read frames back for screenshots, which needs no OS permission.
+            usage: if std::env::var_os("STECAK_DEMO").is_some() && caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -346,6 +353,7 @@ impl Renderer {
             scale,
             transparent,
             premultiplied: alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+            snapshot: None,
         }
     }
 
@@ -707,8 +715,46 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.instance_buf.slice(..));
             pass.draw(0..4, 0..self.instances.len() as u32);
         }
+        let readback = self.snapshot.take().filter(|_| self.surface_cfg.usage.contains(wgpu::TextureUsages::COPY_SRC)).map(|path| {
+            let (w, h) = (self.surface_cfg.width, self.surface_cfg.height);
+            let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (row * h) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                frame.texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            (path, buf, row)
+        });
         self.queue.submit([encoder.finish()]);
+        if let Some((path, buf, row)) = readback {
+            self.save_snapshot(&path, &buf, row);
+        }
         self.queue.present(frame);
         true
+    }
+
+    fn save_snapshot(&self, path: &std::path::Path, buf: &wgpu::Buffer, row: u32) {
+        let (w, h) = (self.surface_cfg.width, self.surface_cfg.height);
+        buf.map_async(wgpu::MapMode::Read, .., |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let Ok(data) = buf.get_mapped_range(..) else { return };
+        let bgra = matches!(self.surface_cfg.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as usize {
+            for px in data[y * row as usize..][..w as usize * 4].chunks_exact(4) {
+                let (r, b) = if bgra { (px[2], px[0]) } else { (px[0], px[2]) };
+                rgba.extend_from_slice(&[r, px[1], b, 255]);
+            }
+        }
+        match image::save_buffer(path, &rgba, w, h, image::ColorType::Rgba8) {
+            Ok(()) => log::info!("snapshot saved to {}", path.display()),
+            Err(e) => log::warn!("snapshot {}: {e}", path.display()),
+        }
     }
 }

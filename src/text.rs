@@ -162,6 +162,34 @@ fn has_cell_metrics(src: &FontSource) -> bool {
     })
 }
 
+/// Loosest declared line, relative to the tallest ASCII glyph, that a normal font has
+/// (Monaco 1.33, JetBrains Mono 1.26, Menlo 1.10). Patched builds go well past it.
+const MAX_LINE_TO_INK: f32 = 1.33;
+
+/// Natural row height and ascent, in px. Uses the font's declared line unless it is padded
+/// far beyond its glyphs (Nerd Font patches of Comic Code declare 1.57× their ink height),
+/// which would make rows so tall that ASCII art looks squished; then the row is cut to
+/// `MAX_LINE_TO_INK` × the ink height and the ink is centered in it.
+fn row_metrics(font: FontRef, px: f32, ascent: f32, below: f32) -> (f32, f32) {
+    let declared = ascent + below;
+    let mut ctx = ScaleContext::new();
+    let mut scaler = ctx.builder(font).size(px).build();
+    let charmap = font.charmap();
+    let (mut top, mut bottom) = (f32::MIN, f32::MAX);
+    for c in '!'..='~' {
+        if let Some(b) = scaler.scale_outline(charmap.map(c)).map(|o| o.bounds()).filter(|b| b.max.y > b.min.y) {
+            top = top.max(b.max.y);
+            bottom = bottom.min(b.min.y);
+        }
+    }
+    let ink = top - bottom;
+    if ink <= 0.0 || declared <= ink * MAX_LINE_TO_INK {
+        return (declared, ascent);
+    }
+    let natural = ink * MAX_LINE_TO_INK;
+    (natural, top + (natural - ink) / 2.0)
+}
+
 /// Free function so callers can borrow `faces` and the shaping contexts disjointly.
 fn face_in(faces: &[Option<Face>], i: u16) -> &Face {
     faces[i as usize].as_ref().or(faces[0].as_ref()).expect("primary face is always loaded")
@@ -213,11 +241,11 @@ impl Text {
         let px = (cfg.font.size * scale).round();
         let font = regular.font();
         let m = font.metrics(&[]).scale(px);
-        let natural_h = m.ascent + m.descent + m.leading;
+        let (natural_h, ascent) = row_metrics(font, px, m.ascent, m.descent + m.leading);
         let cell_h = (natural_h * cfg.font.line_height).round();
         let glyph_m = font.glyph_metrics(&[]).scale(px);
         let cell_w = glyph_m.advance_width(font.charmap().map('M')).round();
-        let baseline = ((cell_h - natural_h) / 2.0 + m.ascent).round();
+        let baseline = ((cell_h - natural_h) / 2.0 + ascent).round();
 
         // Display fonts like BoSanko2 draw small letters for their em size; scale that face so
         // its capitals match the main font's, otherwise the text looks shrunken in the cells.
@@ -478,6 +506,20 @@ mod tests {
             let expected: Vec<u16> = (0..word.chars().count() as u16).collect();
             assert_eq!(cols, expected, "{word}: every character needs its own cell");
         }
+    }
+
+    /// Ordinary fonts keep their declared line; only padded ones are trimmed, ink centered.
+    #[test]
+    fn row_height_trims_only_padded_fonts() {
+        let t = Text::load(&Config::default(), 2.0);
+        let font = t.face(REGULAR as u16).font();
+        let m = font.metrics(&[]).scale(t.px);
+        let (h, ascent) = row_metrics(font, t.px, m.ascent, m.descent + m.leading);
+        assert_eq!((h, ascent), (m.ascent + m.descent + m.leading, m.ascent), "default font should be untouched");
+        // The same font declaring twice its line height gets cut back, and ink stays inside.
+        let (h, ascent) = row_metrics(font, t.px, m.ascent * 2.0, (m.descent + m.leading) * 2.0);
+        assert!(h < (m.ascent + m.descent + m.leading) * 2.0, "padded row {h} not trimmed");
+        assert!(ascent > 0.0 && ascent < h, "baseline {ascent} outside row {h}");
     }
 
     /// A bitmap-only font (no usable metrics) must not produce a zero-size cell.

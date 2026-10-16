@@ -59,7 +59,7 @@ pub enum UserEvent {
     /// Herdr's agents (None: Herdr didn't answer).
     Herdr(Option<Vec<crate::herdr::Agent>>),
     /// How many observations claude-mem holds (None: its worker isn't running).
-    Mem(Option<u64>),
+    Mem(Option<crate::mem::Stats>),
 }
 
 pub struct GridSize {

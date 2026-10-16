@@ -47,6 +47,8 @@ cargo install --git https://github.com/alminisl/stecak
 
 **Welcome screen:** each launch shows a stećak drawn in text and an inscription formula from the stones. Turn it off in Settings or with `welcome: false`.
 
+**Crash reports:** if Stećak crashes, it writes a report, and the next launch offers to file it as a GitHub issue. Nothing is sent unless you choose to.
+
 Run `stecak` for your login shell, or `stecak -e htop` to run a command instead.
 
 ## Why Rust (and not C++)
@@ -84,6 +86,10 @@ clear pick. C++ only wins if you want Qt widgets or must embed into an existing 
   ligatures work while glyphs stay on the cell grid. Shaped runs are cached by text.
 - **Fonts**: memory-mapped, not copied. Fallback fonts (icons, CJK, symbols) are opened only
   the first time a character needs them, and the system font database is dropped after startup.
+- **Row height**: comes from the font's declared line, unless that's padded far beyond its
+  glyphs (some Nerd Font patches declare 1.6× their tallest ASCII glyph, which squashes ASCII
+  art like fastfetch's logo). Then the row is cut to 1.33× the measured glyph height, the
+  loosest any ordinary monospace font uses, and `font.line_height` applies on top.
 
 ## Measurements (Apple M5, macOS 27, release build, 100×30 window)
 
@@ -205,9 +211,14 @@ The image is decoded on a worker thread and resized to the window, so a 4K wallp
 - **Ask AI for a command (⌘I):** describe what you want ("find files over 100 MB here") and the command is typed at your prompt for you to check. It's never run for you. This uses `claude -p` (`agent.ask_command`), so there's no API key to set up.
 - **Explain last error (⌘⇧E):** the last command, its exit code and its output go to your agent, which explains what went wrong. If no agent is open in the tab, one opens in a split. This needs zsh shell integration (on by default). Without it, the agent gets what's on screen instead.
 - **Send selection to agent (⌘⇧L):** pastes the selected text (or, with nothing selected, the last command and its output) into the agent as context, so you can type your question after it.
-- **Context bar:** while Claude Code runs in the tab, a bar under the panes fills up as its context window does, colored by what's in it (system prompt, tools, MCP, memory files, skills, messages) with the autocompact buffer marked at the end, plus tokens used, % of the window and % left until auto-compact. Hover it for the full breakdown. The live total comes from the session transcript; the breakdown comes from running Claude Code's own `/context` in that folder in the background (no API call, refreshed every 10 minutes). Turn it off with `agent.context_bar: false` or in Settings.
+- **Context bar:** while Claude Code runs in the tab, a bar under the panes fills up as its context window does, colored by what's in it (system prompt, tools, MCP, memory files, skills, messages) with the autocompact buffer marked at the end, plus tokens used, % of the window and % left until auto-compact. Hover it for the full breakdown. The live total comes from the session transcript; the breakdown comes from running Claude Code's own `/context` in that folder in the background (no API call, refreshed every 10 minutes). Sessions under a separate `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-personal`) are found too: every `~/.claude*` folder is searched. Turn it off with `agent.context_bar: false` or in Settings.
+- **Memories (claude-mem):** while the [claude-mem](https://github.com/thedotmack/claude-mem) worker runs, the context bar shows how many memories it holds (◈ 629 memories). Hover it to see the project's newest ones: type (bugfix, feature, discovery, change, refactor, decision), title, age and summary. Click it, or run **Memory: open claude-mem viewer** from the palette, to open claude-mem's viewer.
+- **Herdr agent strip:** while [Herdr](https://herdr.dev) runs in the tab, a row above the context bar shows each of its agents with its status, name and how full its context is, and the context bar follows the agent Herdr has focused.
+- **Agent tools setup:** the first launch offers, once, to install claude-mem and Herdr in a new tab. **Set up agent tools** in the palette does the same later.
 - **Paste images into agents:** ⌘V with an image (e.g. a screenshot) on the clipboard sends it to Claude Code or Codex.
 - **Sessions come back:** when you close the window, each pane's folder is saved, along with the exact Claude Code conversation running in it. At the next launch, every tab and split reopens with `claude --resume <that session>`. Codex panes resume their latest conversation in that folder. When you quit the agent, you're left at a shell.
+
+<p align="center"><img src="docs/img/context-breakdown.png" width="49%" alt="The context bar's hover breakdown: system prompt, tools, MCP, skills, messages, free space and the autocompact buffer"> <img src="docs/img/memories.png" width="49%" alt="Hovering the memory chip lists the project's newest claude-mem memories with type, title, age and summary"></p>
 
 ```yaml
 agent:
@@ -268,18 +279,16 @@ Stećak uses the **`alacritty_terminal` library crate**: the VT/ANSI parser, the
 
 - **Before a public beta:**
   - signed, notarized macOS app
-  - Windows and Linux actually run day to day (today they only build in CI)
+  - Linux used day to day (today it only builds in CI)
   - vttest/esctest compatibility pass
   - panic recovery per pane
   - IME tested with real input methods (support is implemented but unverified)
 - **For 1.0:**
   - kitty keyboard protocol
-  - shell integration (OSC 7, OSC 133, OSC 8 links)
-  - multiple windows and session restore
+  - multiple windows
   - configurable key bindings
-  - VoiceOver support and auto-update
 - **Later:**
-  - inline images (kitty graphics, sixel)
+  - kitty graphics protocol (sixel is done)
   - compressed scrollback (needs its own grid instead of `alacritty_terminal`'s; the main remaining memory lever)
 
 ## License
