@@ -86,8 +86,6 @@ pub fn luma(c: [f32; 3]) -> f32 {
 }
 
 pub struct Preset {
-    /// A Bosnian name, with the palette it comes from in parentheses so searching for the
-    /// original still finds it.
     pub name: &'static str,
     /// fg, bg, cursor, tab_bar, tab_active, selection, then 16 ANSI colors.
     colors: [&'static str; 22],
@@ -95,7 +93,7 @@ pub struct Preset {
 
 pub const PRESETS: &[Preset] = &[
     Preset {
-        name: "Produžena sa mlijekom (Catppuccin Mocha)",
+        name: "Catppuccin Mocha",
         colors: [
             "#cdd6f4", "#1e1e2e", "#f5e0dc", "#181825", "#313244", "#585b70", //
             "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de", //
@@ -103,7 +101,7 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Sarajevska noć (Tokyo Night)",
+        name: "Tokyo Night",
         colors: [
             "#c0caf5", "#1a1b26", "#c0caf5", "#16161e", "#292e42", "#33467c", //
             "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6", //
@@ -111,7 +109,7 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Šljiva (Dracula)",
+        name: "Dracula",
         colors: [
             "#f8f8f2", "#282a36", "#f8f8f2", "#21222c", "#44475a", "#44475a", //
             "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2", //
@@ -119,7 +117,7 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Bosanski lonac (Gruvbox Dark)",
+        name: "Gruvbox Dark",
         colors: [
             "#ebdbb2", "#282828", "#ebdbb2", "#1d2021", "#3c3836", "#504945", //
             "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984", //
@@ -127,7 +125,7 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Kajmak (Solarized Light)",
+        name: "Solarized Light",
         colors: [
             "#586e75", "#fdf6e3", "#586e75", "#eee8d5", "#fdf6e3", "#eee8d5", //
             "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5", //
@@ -137,7 +135,7 @@ pub const PRESETS: &[Preset] = &[
     // Black-background themes, for OLED screens or a plain iTerm2-style look.
     Preset {
         // iTerm2's default "Dark Background" profile.
-        name: "Bosanska kafa (iTerm Dark)",
+        name: "iTerm Dark",
         colors: [
             "#c7c7c7", "#000000", "#c7c7c7", "#000000", "#1c1c1c", "#3a4a5e", //
             "#000000", "#c91b00", "#00c200", "#c7c400", "#2225c4", "#ca30c7", "#00c5c7", "#c7c7c7", //
@@ -146,7 +144,7 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         // macOS Terminal's "Pro" profile.
-        name: "Ponoć (Pro)",
+        name: "Pro",
         colors: [
             "#f2f2f2", "#000000", "#4d4d4d", "#000000", "#1a1a1a", "#414141", //
             "#000000", "#990000", "#00a600", "#999900", "#2009db", "#b200b2", "#00a6b2", "#bfbfbf", //
@@ -154,7 +152,7 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Kakanjski smog (Tomorrow Night Bright)",
+        name: "Tomorrow Night Bright",
         colors: [
             "#eaeaea", "#000000", "#9f9f9f", "#000000", "#1c1c1c", "#424242", //
             "#000000", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#ffffff", //
@@ -163,7 +161,7 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         // Catppuccin Mocha's palette on true black.
-        name: "Produžena bez mlijeka (Catppuccin OLED)",
+        name: "Catppuccin OLED",
         colors: [
             "#cdd6f4", "#000000", "#f5e0dc", "#000000", "#1e1e2e", "#45475a", //
             "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de", //
