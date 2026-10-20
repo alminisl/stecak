@@ -154,7 +154,7 @@ pub const PRESETS: &[Preset] = &[
         ],
     },
     Preset {
-        name: "Sevdah (Tomorrow Night Bright)",
+        name: "Kakanjski smog (Tomorrow Night Bright)",
         colors: [
             "#eaeaea", "#000000", "#9f9f9f", "#000000", "#1c1c1c", "#424242", //
             "#000000", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#ffffff", //

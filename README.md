@@ -234,7 +234,7 @@ editor: ""               # for ⌘-click on file:line; empty = VS Code / Cursor 
                          # e.g. "nvim +{line} {file}" (terminal editors open in a new tab)
 ```
 
-**Command palette (⌘⇧P):** every action, every theme and every installed monospace font, all in one searchable list. Themes carry Bosnian names with the palette they come from in parentheses, e.g. *Produžena sa mlijekom (Catppuccin Mocha)*, *Sarajevska noć (Tokyo Night)*, *Šljiva (Dracula)*; four of them, *Bosanska kafa*, *Ponoć*, *Sevdah* and *Produžena bez mlijeka*, sit on true black.
+**Command palette (⌘⇧P):** every action, every theme and every installed monospace font, all in one searchable list. Themes carry Bosnian names with the palette they come from in parentheses, e.g. *Produžena sa mlijekom (Catppuccin Mocha)*, *Sarajevska noć (Tokyo Night)*, *Šljiva (Dracula)*; four of them, *Bosanska kafa*, *Ponoć*, *Kakanjski smog* and *Produžena bez mlijeka*, sit on true black.
 
 **Clickable file paths:** ⌘-click `src/main.rs:120:5` in compiler or agent output to open it at that line in your editor.
 
