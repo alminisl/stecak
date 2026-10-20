@@ -132,6 +132,42 @@ pub const PRESETS: &[Preset] = &[
             "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
         ],
     },
+    // Black-background themes, for OLED screens or a plain iTerm2-style look.
+    Preset {
+        // iTerm2's default "Dark Background" profile.
+        name: "iTerm Dark",
+        colors: [
+            "#c7c7c7", "#000000", "#c7c7c7", "#000000", "#1c1c1c", "#3a4a5e", //
+            "#000000", "#c91b00", "#00c200", "#c7c400", "#2225c4", "#ca30c7", "#00c5c7", "#c7c7c7", //
+            "#686868", "#ff6e67", "#5ffa68", "#fffc67", "#6871ff", "#ff77ff", "#60fdff", "#ffffff",
+        ],
+    },
+    Preset {
+        // macOS Terminal's "Pro" profile.
+        name: "Pro",
+        colors: [
+            "#f2f2f2", "#000000", "#4d4d4d", "#000000", "#1a1a1a", "#414141", //
+            "#000000", "#990000", "#00a600", "#999900", "#2009db", "#b200b2", "#00a6b2", "#bfbfbf", //
+            "#666666", "#e50000", "#00d900", "#e5e500", "#0000ff", "#e500e5", "#00e5e5", "#e5e5e5",
+        ],
+    },
+    Preset {
+        name: "Tomorrow Night Bright",
+        colors: [
+            "#eaeaea", "#000000", "#9f9f9f", "#000000", "#1c1c1c", "#424242", //
+            "#000000", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#ffffff", //
+            "#969896", "#d54e53", "#b9ca4a", "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#ffffff",
+        ],
+    },
+    Preset {
+        // Catppuccin Mocha's palette on true black.
+        name: "Catppuccin OLED",
+        colors: [
+            "#cdd6f4", "#000000", "#f5e0dc", "#000000", "#1e1e2e", "#45475a", //
+            "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de", //
+            "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
+        ],
+    },
 ];
 
 impl Preset {
