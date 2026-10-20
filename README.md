@@ -181,9 +181,10 @@ Screen readers (Narrator, NVDA, VoiceOver, Orca) can read the focused pane's scr
 stays idle unless one is running.
 
 CI: when the focused pane is in a GitHub or GitLab repo, the bar under the panes shows an icon
-at its right end for the latest commit on the branch: ● running, ✓ passed, ✗ failed. Hover it to see every
-workflow (builds, releases, Pages deploys…) with its status; click a run to open it. If a run finishes while
-the window isn't focused, you get a notification. Tokens come from `GH_TOKEN` / `GITHUB_TOKEN` /
+at its right end for the latest commit: ● running, ✓ passed, ✗ failed. While something runs it counts
+jobs, like `● 8/10`. Hover it to see every workflow (builds, releases, Pages deploys…) with its jobs
+and their status; click a run or a job to open it. Runs of your commit from a tag (releases) show next
+to the branch's. If a run finishes while the window isn't focused, you get a notification. Tokens come from `GH_TOKEN` / `GITHUB_TOKEN` /
 `gh`, or `GITLAB_TOKEN` / `glab`; public repos work without one. List self-hosted GitLab servers
 under `ci.gitlab_hosts`. On Windows the pane's folder is known in PowerShell, not cmd.
 

@@ -830,9 +830,9 @@ impl App {
         y >= self.r().size().1 - self.bar_row_h() && x < right && x >= right - self.mem_chip_w()
     }
 
-    /// Width of the CI icon at the right end of the bottom bar (0 without one).
+    /// Width of the CI chip at the right end of the bottom bar (0 without one).
     fn ci_chip_w(&self) -> f32 {
-        if self.ci.status.is_some() { 3.0 * self.r().cell().0 } else { 0.0 }
+        self.ci.status.as_ref().map_or(0.0, |s| (ci_label(s).chars().count() + 2) as f32 * self.r().cell().0)
     }
 
     fn over_ci_icon(&self, x: f32, y: f32) -> bool {
@@ -1622,8 +1622,10 @@ impl App {
                     _ => ci::State::Passed,
                 };
                 let url = "https://github.com/alminisl/stecak/actions".to_string();
-                let runs = [("CI", state), ("Release", ci::State::Passed), ("pages build and deployment", ci::State::Passed)]
-                    .map(|(name, state)| ci::Run { name: name.into(), state, url: url.clone() })
+                let job = |name: &str, state| ci::Job { name: name.into(), state, url: url.clone() };
+                let ci_jobs = vec![job("macos", ci::State::Passed), job("linux", state), job("windows", state), job("windows-arm64", ci::State::Running)];
+                let runs = [("CI", state, ci_jobs), ("Release", ci::State::Passed, vec![]), ("pages build and deployment", ci::State::Passed, vec![job("deploy", ci::State::Passed)])]
+                    .map(|(name, state, jobs)| ci::Run { name: name.into(), state, url: url.clone(), jobs })
                     .to_vec();
                 self.ci.status = Some(ci::Status { state, url, name: "CI".into(), runs });
                 self.sync_bottom_bar();
@@ -1860,9 +1862,9 @@ impl App {
             }
         }
         if let Some((panel, y0, lh)) = self.ci_panel.filter(|p| self.ci_hover && p.0.contains(x, y)) {
-            let run = self.ci.status.as_ref().and_then(|s| s.runs.get(((y - y0).max(0.0) / lh) as usize));
-            if let Some(run) = run.filter(|_| y >= y0 && x >= panel.x) {
-                mouse::open_url(&run.url);
+            let url = self.ci.status.as_ref().and_then(|s| s.rows().get(((y - y0).max(0.0) / lh) as usize).map(|r| r.url.to_string()));
+            if let Some(url) = url.filter(|u| y >= y0 && x >= panel.x && !u.is_empty()) {
+                mouse::open_url(&url);
             }
             return;
         }
@@ -2333,8 +2335,8 @@ impl App {
             let h = (ch * 1.5).round();
             draw_herdr_strip(r, theme, agents, &self.breakdowns, win_h - h * (t.context_bar as u8 + 1) as f32);
         }
-        let chip = self.ci.status.as_ref().map(|s| ci_glyph(s.state));
-        let chip_w = if chip.is_some() { 3.0 * cw } else { 0.0 };
+        let chip = self.ci.status.as_ref().map(|s| (ci_label(s), ci_glyph(s.state).1));
+        let chip_w = chip.as_ref().map_or(0.0, |(l, _)| (l.chars().count() + 2) as f32 * cw);
         if let Some(c) = &self.context {
             let breakdown = self.breakdowns.get(&c.cwd).and_then(|b| b.1.as_ref());
             draw_context_bar(r, theme, c.used.as_ref(), breakdown, self.context_hover, chip_w + mem_w);
@@ -2356,13 +2358,13 @@ impl App {
             r.rect(0.0, win_h - h, win_w, r.scale.max(1.0), rgba(theme.fg, 0.08));
         }
         self.ci_panel = None;
-        if let Some((glyph, color)) = chip {
+        if let Some((label, color)) = chip {
             let h = (ch * 1.5).round();
-            let x = win_w - 2.0 * cw;
+            let x = win_w - chip_w + cw;
             if self.ci_hover {
                 r.rect(win_w - chip_w, win_h - h, chip_w, h, rgba(theme.fg, 0.08));
             }
-            r.text(glyph, x, win_h - h + ((h - ch) / 2.0).round(), win_w, rgba(color(theme), 1.0));
+            r.text(&label, x, win_h - h + ((h - ch) / 2.0).round(), win_w, rgba(color(theme), 1.0));
             if let Some(s) = self.ci.status.as_ref().filter(|_| self.ci_hover) {
                 self.ci_panel = Some(draw_ci_panel(r, theme, s, win_h - h));
             }
@@ -2814,6 +2816,15 @@ fn category_color(theme: &Theme, name: &str) -> [f32; 3] {
 
 /// The context bar under the panes: how full the Claude Code session's context window is,
 /// split by category, with the full breakdown in a panel while the mouse is over it.
+/// The bottom-bar chip's text: the state's icon, plus "done/total" jobs while a run is going.
+fn ci_label(s: &ci::Status) -> String {
+    let (glyph, _) = ci_glyph(s.state);
+    match s.jobs_done() {
+        Some((done, total)) if s.state == ci::State::Running => format!("{glyph} {done}/{total}"),
+        _ => glyph.to_string(),
+    }
+}
+
 /// A CI state's icon and color.
 fn ci_glyph(state: ci::State) -> (&'static str, fn(&Theme) -> [f32; 3]) {
     match state {
@@ -2824,8 +2835,8 @@ fn ci_glyph(state: ci::State) -> (&'static str, fn(&Theme) -> [f32; 3]) {
     }
 }
 
-/// The CI icon's hover list: one row per workflow run, sitting on the bottom bar at `bar_y`.
-/// Returns (panel, first row y, row height).
+/// The CI icon's hover list: one row per workflow run with its jobs indented under it, sitting
+/// on the bottom bar at `bar_y`. Returns (panel, first row y, row height).
 fn draw_ci_panel(r: &mut Renderer, theme: &Theme, s: &ci::Status, bar_y: f32) -> (Rect, f32, f32) {
     let (cw, ch) = r.cell();
     let win_w = r.size().0;
@@ -2837,9 +2848,12 @@ fn draw_ci_panel(r: &mut Renderer, theme: &Theme, s: &ci::Status, bar_y: f32) ->
         ci::State::Failed => "failed",
         ci::State::Other => "cancelled",
     };
-    let longest = s.runs.iter().map(|r| r.name.chars().count()).max().unwrap_or(0);
+    // As many rows as fit above the bar, with room for the tab bar.
+    let mut rows = s.rows();
+    rows.truncate((((bar_y / lh) - 6.0).max(1.0)) as usize);
+    let longest = rows.iter().map(|r| r.name.chars().count() + 2 * r.depth).max().unwrap_or(0);
     let w = ((longest + 18) as f32 * cw).clamp(30.0 * cw, (win_w - 2.0 * cw).max(cw));
-    let ph = lh * (s.runs.len() as f32 + 3.0);
+    let ph = lh * (rows.len() as f32 + 3.0);
     let panel = Rect { x: win_w - w - cw, y: bar_y - ph, w: w + cw, h: ph };
     let (px0, pad) = (panel.x, 2.0 * cw);
     let (_, accent) = ci_glyph(s.state);
@@ -2847,16 +2861,18 @@ fn draw_ci_panel(r: &mut Renderer, theme: &Theme, s: &ci::Status, bar_y: f32) ->
     r.rect(px0, panel.y, w, r.scale.max(1.0), rgba(accent(theme), 1.0));
     r.text("CI · latest commit", px0 + pad, panel.y + lh * 0.3 + dy, px0 + w - pad, rgba(theme.fg, 1.0));
     let y0 = panel.y + lh * 1.5;
-    for (i, run) in s.runs.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         let ry = y0 + i as f32 * lh + dy;
-        let (glyph, color) = ci_glyph(run.state);
-        let v = verdict(run.state);
+        let (glyph, color) = ci_glyph(row.state);
+        let v = verdict(row.state);
         let vx = px0 + w - pad - v.chars().count() as f32 * cw;
-        r.text(glyph, px0 + pad, ry, px0 + pad + 2.0 * cw, rgba(color(theme), 1.0));
-        r.text(&run.name, px0 + pad + 2.0 * cw, ry, vx - cw, rgba(theme.fg, 0.9));
-        r.text(v, vx, ry, px0 + w, rgba(color(theme), 0.9));
+        let x = px0 + pad + 2.0 * row.depth as f32 * cw;
+        let alpha = if row.depth == 0 { 1.0 } else { 0.7 };
+        r.text(glyph, x, ry, x + 2.0 * cw, rgba(color(theme), alpha));
+        r.text(row.name, x + 2.0 * cw, ry, vx - cw, rgba(theme.fg, 0.9 * alpha));
+        r.text(v, vx, ry, px0 + w, rgba(color(theme), 0.9 * alpha));
     }
-    r.text("click a run to open it", px0 + pad, panel.y + ph - lh + dy - lh * 0.2, px0 + w - pad, rgba(theme.fg, 0.4));
+    r.text("click a run or job to open it", px0 + pad, panel.y + ph - lh + dy - lh * 0.2, px0 + w - pad, rgba(theme.fg, 0.4));
     (panel, y0, lh)
 }
 
