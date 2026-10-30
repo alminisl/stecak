@@ -210,6 +210,8 @@ struct App {
     modifiers: ModifiersState,
     mouse: (f32, f32),
     drag: Option<Drag>,
+    /// Next scroll step while drag-selecting past a pane's edge.
+    autoscroll_at: Instant,
     last_click: Option<(Instant, PaneId, Point, u8)>,
     hover_url: Option<(PaneId, i32, usize, usize, mouse::Link)>,
     scroll_accum: f64,
@@ -333,6 +335,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
             drag: None,
+            autoscroll_at: Instant::now(),
             last_click: None,
             hover_url: None,
             scroll_accum: 0.0,
@@ -2072,21 +2075,7 @@ impl App {
                 self.resize_all();
             }
             Some(Drag::Select(id)) => {
-                let (cw, ch) = self.r().cell();
-                let (geoms, _) = self.geometry(self.active);
-                let Some(g) = geoms.into_iter().find(|g| g.id == id) else { return };
-                let (x, y) = self.mouse;
-                let fx = ((x - g.gx) / cw).clamp(0.0, g.cols as f32 - 0.01);
-                let row = ((y - g.gy) / ch).floor().clamp(0.0, g.rows as f32 - 1.0) as usize;
-                let side = if fx.fract() < 0.5 { Side::Left } else { Side::Right };
-                if let Some(p) = self.panes.get(&id) {
-                    let mut term = p.term.lock();
-                    let point = Point::new(Line(row as i32 - term.grid().display_offset() as i32), Column(fx as usize));
-                    if let Some(sel) = term.selection.as_mut() {
-                        sel.update(point, side);
-                    }
-                }
-                self.mark_dirty();
+                self.extend_selection(id, false);
             }
             Some(Drag::Report(id)) => {
                 if let Some((_, col, row, _)) = self.hit().filter(|h| h.0.id == id) {
@@ -2095,6 +2084,39 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// Moves the selection end to the mouse. With `scroll`, a mouse above or below the pane
+    /// first scrolls the scrollback, faster the farther out; returns whether it is out there.
+    fn extend_selection(&mut self, id: PaneId, scroll: bool) -> bool {
+        let (cw, ch) = self.r().cell();
+        let (geoms, _) = self.geometry(self.active);
+        let Some(g) = geoms.into_iter().find(|g| g.id == id) else { return false };
+        let (x, y) = self.mouse;
+        let bottom = g.gy + g.rows as f32 * ch;
+        // Lines past the edge: positive above (into history), negative below.
+        let over = if y < g.gy {
+            ((g.gy - y) / ch) as i32 + 1
+        } else if y >= bottom {
+            -(((y - bottom) / ch) as i32 + 1)
+        } else {
+            0
+        };
+        let fx = ((x - g.gx) / cw).clamp(0.0, g.cols as f32 - 0.01);
+        let row = ((y - g.gy) / ch).floor().clamp(0.0, g.rows as f32 - 1.0) as usize;
+        let side = if fx.fract() < 0.5 { Side::Left } else { Side::Right };
+        if let Some(p) = self.panes.get(&id) {
+            let mut term = p.term.lock();
+            if scroll && over != 0 {
+                term.scroll_display(Scroll::Delta(over.clamp(-8, 8)));
+            }
+            let point = Point::new(Line(row as i32 - term.grid().display_offset() as i32), Column(fx as usize));
+            if let Some(sel) = term.selection.as_mut() {
+                sel.update(point, side);
+            }
+        }
+        self.mark_dirty();
+        over != 0
     }
 
     fn on_tab_bar_click(&mut self, x: f32, button: MouseButton, event_loop: &ActiveEventLoop) {
@@ -3193,6 +3215,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             if self.flash.is_some_and(|f| f.1.elapsed().as_secs_f32() < FLASH) {
                 at(now + Duration::from_millis(16));
+            }
+        }
+        // Drag-selecting past a pane's edge keeps scrolling while the mouse stays out there.
+        if let Some(Drag::Select(id)) = self.drag {
+            if now < self.autoscroll_at {
+                at(self.autoscroll_at);
+            } else if self.extend_selection(id, true) {
+                self.autoscroll_at = now + Duration::from_millis(50);
+                at(self.autoscroll_at);
             }
         }
         if let Some(t) = self.poll_ci() {
