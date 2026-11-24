@@ -301,12 +301,41 @@ fn windows_processes() -> Vec<WinProcess> {
     out
 }
 
+/// The process list, shared by every caller. A snapshot takes ~30 ms with a few hundred
+/// processes, and the UI thread asks per pane several times a second, so it reads the last
+/// snapshot and a background thread takes a new one when that is over 500 ms old.
+#[cfg(windows)]
+fn processes() -> std::sync::Arc<Vec<WinProcess>> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    static CACHE: parking_lot::Mutex<Option<(Instant, Arc<Vec<WinProcess>>)>> = parking_lot::Mutex::new(None);
+    static REFRESHING: AtomicBool = AtomicBool::new(false);
+    let cached = CACHE.lock().clone();
+    let Some((at, procs)) = cached else {
+        let procs = Arc::new(windows_processes());
+        *CACHE.lock() = Some((Instant::now(), procs.clone()));
+        return procs;
+    };
+    if at.elapsed() > Duration::from_millis(500) && !REFRESHING.swap(true, Ordering::AcqRel) {
+        let spawned = std::thread::Builder::new().name("processes".into()).spawn(|| {
+            let procs = Arc::new(windows_processes());
+            *CACHE.lock() = Some((Instant::now(), procs));
+            REFRESHING.store(false, Ordering::Release);
+        });
+        if spawned.is_err() {
+            REFRESHING.store(false, Ordering::Release);
+        }
+    }
+    procs
+}
+
 /// Windows has no foreground process group, so the pane's "foreground process" is found in
 /// the shell's process tree: the outermost agent if one runs, else the most deeply nested
 /// child (what you just started), else the shell itself.
 #[cfg(windows)]
 pub fn foreground(shell_pid: u32) -> Option<(u32, String)> {
-    let procs = windows_processes();
+    let procs = processes();
     let children = |pid: u32| procs.iter().filter(move |p| p.parent == pid && p.pid != pid && !matches!(p.name.as_str(), "conhost" | "openconsole"));
     let mut level: Vec<&WinProcess> = children(shell_pid).collect();
     let mut deepest = None;

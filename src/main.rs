@@ -3513,9 +3513,17 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
                 let cfg = self.config.clone();
-                if let Some(r) = self.renderer.as_mut() {
+                if let (Some(r), Some(w)) = (self.renderer.as_mut(), self.window.as_ref()) {
+                    // Pick the new size now (same logical size, as winit would) and size the grid for
+                    // it. Otherwise panes resize for the old size at the new font size, then back on
+                    // Resized: two PTY reflows that garble the screen while moving between monitors.
+                    let old = PhysicalSize::new(r.size().0 as u32, r.size().1 as u32);
+                    let keep = w.is_maximized() || w.fullscreen().is_some();
+                    let size = if keep { old } else { old.to_logical::<f64>(r.scale as f64).to_physical::<u32>(scale_factor) };
+                    let _ = inner_size_writer.request_inner_size(size);
+                    r.resize(size.width, size.height);
                     r.reload_fonts(&cfg, scale_factor as f32);
                 }
                 self.resize_all();
